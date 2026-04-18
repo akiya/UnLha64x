@@ -1,0 +1,166 @@
+# -*- shell-script -*-
+message testing header level 0, 1, 2 and each generic headers
+$lha c0  test-tmp-h0.lzh test-1
+							check $? $LINENO
+$lha c1  test-tmp-h1.lzh test-1
+							check $? $LINENO
+$lha c2  test-tmp-h2.lzh test-1
+							check $? $LINENO
+$lha xw=test-tmp-h0  test-tmp-h0.lzh
+							check $? $LINENO
+$lha xw=test-tmp-h1  test-tmp-h1.lzh
+							check $? $LINENO
+$lha xw=test-tmp-h2  test-tmp-h2.lzh
+							check $? $LINENO
+$lha vv test-tmp-h0.lzh
+							check $? $LINENO
+$lha vv test-tmp-h1.lzh
+							check $? $LINENO
+$lha vv test-tmp-h2.lzh
+							check $? $LINENO
+$lha vv test-tmp-h0.lzh | grep -E '\[0\].?$'
+							check $? $LINENO
+$lha vv test-tmp-h1.lzh | grep -E '\[1\].?$'
+							check $? $LINENO
+$lha vv test-tmp-h2.lzh | grep -E '\[2\].?$'
+							check $? $LINENO
+diff -r test-1 test-tmp-h0/test-1
+							check $? $LINENO
+diff -r test-1 test-tmp-h1/test-1
+							check $? $LINENO
+diff -r test-1 test-tmp-h2/test-1
+							check $? $LINENO
+# contains directory header (-lhd-)
+mkdir test-tmp-d1 &&
+cp test-a test-tmp-d1 &&
+mkdir test-tmp-d1/d2 &&
+cp test-b test-tmp-d1/d2 &&
+mkdir test-tmp-d1/d2/d3 &&
+cp test-c test-tmp-d1/d2/d3
+							check $? $LINENO
+$lha c0  test-tmp2-h0.lzh test-tmp-d1
+							check $? $LINENO
+$lha c1  test-tmp2-h1.lzh test-tmp-d1
+							check $? $LINENO
+$lha c2  test-tmp2-h2.lzh test-tmp-d1
+							check $? $LINENO
+$lha xw=test-tmp2-h0  test-tmp2-h0.lzh
+							check $? $LINENO
+$lha xw=test-tmp2-h1  test-tmp2-h1.lzh
+							check $? $LINENO
+$lha xw=test-tmp2-h2  test-tmp2-h2.lzh
+							check $? $LINENO
+$lha vv test-tmp2-h0.lzh
+							check $? $LINENO
+$lha vv test-tmp2-h1.lzh
+							check $? $LINENO
+$lha vv test-tmp2-h2.lzh
+							check $? $LINENO
+$lha vv test-tmp2-h0.lzh | grep -E '\[0\].?$'
+							check $? $LINENO
+$lha vv test-tmp2-h1.lzh | grep -E '\[1\].?$'
+							check $? $LINENO
+$lha vv test-tmp2-h2.lzh | grep -E '\[2\].?$'
+							check $? $LINENO
+diff test-a test-tmp2-h0/test-tmp-d1/test-a
+							check $? $LINENO
+diff test-b test-tmp2-h0/test-tmp-d1/d2/test-b
+							check $? $LINENO
+diff test-c test-tmp2-h0/test-tmp-d1/d2/d3/test-c
+							check $? $LINENO
+diff test-a test-tmp2-h1/test-tmp-d1/test-a
+							check $? $LINENO
+diff test-b test-tmp2-h1/test-tmp-d1/d2/test-b
+							check $? $LINENO
+diff test-c test-tmp2-h1/test-tmp-d1/d2/d3/test-c
+							check $? $LINENO
+diff test-a test-tmp2-h2/test-tmp-d1/test-a
+							check $? $LINENO
+diff test-b test-tmp2-h2/test-tmp-d1/d2/test-b
+							check $? $LINENO
+diff test-c test-tmp2-h2/test-tmp-d1/d2/d3/test-c
+							check $? $LINENO
+
+# generic archive
+
+$lha cg0 test-tmp-hg0.lzh test-1
+							check $? $LINENO
+$lha cg1 test-tmp-hg1.lzh test-1
+							check $? $LINENO
+$lha cg2 test-tmp-hg2.lzh test-1
+							check $? $LINENO
+$lha xw=test-tmp-hg0  test-tmp-hg0.lzh
+							check $? $LINENO
+$lha xw=test-tmp-hg1  test-tmp-hg1.lzh
+							check $? $LINENO
+$lha xw=test-tmp-hg2  test-tmp-hg2.lzh
+							check $? $LINENO
+$lha vv test-tmp-hg0.lzh
+							check $? $LINENO
+$lha vv test-tmp-hg1.lzh
+							check $? $LINENO
+$lha vv test-tmp-hg2.lzh
+							check $? $LINENO
+$lha vv test-tmp-hg0.lzh | grep -E '\[0\].?$'
+							check $? $LINENO
+$lha vv test-tmp-hg1.lzh | grep -E '\[1\].?$'
+							check $? $LINENO
+$lha vv test-tmp-hg2.lzh | grep -E '\[2\].?$'
+							check $? $LINENO
+diff -r test-1 test-tmp-hg0/test-1
+							check $? $LINENO
+diff -r test-1 test-tmp-hg1/test-1
+							check $? $LINENO
+diff -r test-1 test-tmp-hg2/test-1
+							check $? $LINENO
+# contains directory header (-lhd-)
+mkdir test-tmp-gd1 &&
+cp test-a test-tmp-gd1 &&
+mkdir test-tmp-gd1/d2 &&
+cp test-b test-tmp-gd1/d2 &&
+mkdir test-tmp-gd1/d2/d3 &&
+cp test-c test-tmp-gd1/d2/d3 &&
+							check $? $LINENO
+
+$lha cg0 test-tmp2-hg0.lzh test-tmp-gd1
+							check $? $LINENO
+$lha cg1 test-tmp2-hg1.lzh test-tmp-gd1
+							check $? $LINENO
+$lha cg2 test-tmp2-hg2.lzh test-tmp-gd1
+							check $? $LINENO
+$lha xw=test-tmp2-hg0  test-tmp2-hg0.lzh
+							check $? $LINENO
+$lha xw=test-tmp2-hg1  test-tmp2-hg1.lzh
+							check $? $LINENO
+$lha xw=test-tmp2-hg2  test-tmp2-hg2.lzh
+							check $? $LINENO
+$lha vv test-tmp2-hg0.lzh
+							check $? $LINENO
+$lha vv test-tmp2-hg1.lzh
+							check $? $LINENO
+$lha vv test-tmp2-hg2.lzh
+							check $? $LINENO
+$lha vv test-tmp2-hg0.lzh | grep -E '\[0\].?$'
+							check $? $LINENO
+$lha vv test-tmp2-hg1.lzh | grep -E '\[1\].?$'
+							check $? $LINENO
+$lha vv test-tmp2-hg2.lzh | grep -E '\[2\].?$'
+							check $? $LINENO
+diff test-a test-tmp2-hg0/test-tmp-gd1/test-a
+							check $? $LINENO
+diff test-b test-tmp2-hg0/test-tmp-gd1/d2/test-b
+							check $? $LINENO
+diff test-c test-tmp2-hg0/test-tmp-gd1/d2/d3/test-c
+							check $? $LINENO
+diff test-a test-tmp2-hg1/test-tmp-gd1/test-a
+							check $? $LINENO
+diff test-b test-tmp2-hg1/test-tmp-gd1/d2/test-b
+							check $? $LINENO
+diff test-c test-tmp2-hg1/test-tmp-gd1/d2/d3/test-c
+							check $? $LINENO
+diff test-a test-tmp2-hg2/test-tmp-gd1/test-a
+							check $? $LINENO
+diff test-b test-tmp2-hg2/test-tmp-gd1/d2/test-b
+							check $? $LINENO
+diff test-c test-tmp2-hg2/test-tmp-gd1/d2/d3/test-c
+							check $? $LINENO

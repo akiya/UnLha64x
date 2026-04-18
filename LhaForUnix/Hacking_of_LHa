@@ -1,0 +1,7142 @@
+$Id$
+
+               The Hacking of LHa for UNIX (3rd draft)
+             -------------------------------------------
+
+                                      Koji Arai <jca02266@gmail.com>
+
+本書は、LHa for UNIX 1.14i のソースを解読し、その圧縮アルゴリズムの実
+装を確認するためのものだ。この成果は別の形でまとめなおされ資料になるか
+もしれないし、このままの形で保管されるかもしれないし、新たにソースを書
+き起こす元になるかもしれない。とにかく、暇な正月休みを潰すためにやって
+みただけのものだ。(休みが明けるとまた忙しくなるので、これ以上まったく
+何もしないかもしれない)
+
+本書は、まだ未完成である。にもかかわらず公開するのはこれ以上続かないか
+もしれないからである(気が向いたらまた続きを書くだろう。あるいは応援の
+お手紙がくればやる気が出るかもしれない)。
+
+本書はフリーである。複製、改変、再配布は自由であるということだ。ただし
+本書により生じたあらゆる損害、不利益に対しては一切の保証はない。本書に
+は嘘があるかもしれない。それに対して嘘を教えられたと著者を避難をしない
+で頂きたい。しかし間違いの指摘は構わない(ぜひお願いしたい)、著者は圧縮
+処理に関しては無知である。用語の使い方等は適切でないかもしれないのでこ
+の方面でも御指導頂ければ幸いである。
+
+< 目次 >
+
+表記について
+slide 辞書法 (slide.c)
+bit 入出力ルーチン (crcio.c)
+Huffman 法 (huf.c)
+LHA ファイルの構造(まとめ)
+セキュリティバグの考察
+
+===============================================================================
+表記について
+
+* 関数は、その定義ソース file.c と関数名 func() を示すのに
+     file.c:func()
+  という記述を使う
+
+* 配列の添字は、Python言語のスライス演算子の記法に準じた
+
+    a[m:n] は、m <= i < m+n の範囲の a[i] を意味する。
+
+* 値の範囲は、Ruby言語の範囲演算子の記法に準じた。これを配列の
+  添字に使用する場合もある。
+
+    m <= i <= n   -> i = m..n
+    m <= i < n    -> i = m...n
+
+    a[m..n] は、m <= i <= n の範囲の a[i] を意味する。
+
+* m の n 乗 は、m^n で表す。^ は、排他的論理和としても利用されるが
+  文脈から判断してもらう。
+
+* v{n} は、変数 v の値が n であることを表す。n は、サンプルの値であったり
+  定数の値であったりする。
+
+  v=n は代入文
+
+  配列の内容は、
+    ary[] {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0 }
+  のように書く
+
+o 用語について
+
+* 符号
+        符号化、符号語、圧縮文
+
+        符号語は、1つの文字を符号化した結果。圧縮文は符号語の並び。
+
+* 復号
+        復号化、復号語、復号文
+
+        復号語は、圧縮文から1つの文字を復号化した結果。復号文は復号語の並び。
+
+* 平文
+        圧縮前の文を示す。対して復号文は、復号した後の文を意味する。
+
+* slide 辞書法
+
+* Huffman 法
+   動的 Huffman 法、静的 Huffman 法
+
+===============================================================================
+
+
+slide 辞書法 (slide.c)
+----------------------
+
+まず、構造について考える。
+
+slide辞書法は、encoding にさまざまな工夫が凝らされるのでとても複雑だが、
+普通 decoding は単純である。decoding を解析することでどのような圧縮文
+を作っているのかを調べてみる。
+
+decoding を行う処理は、slide.c の decode() である。この処理を見てみる
+と思った通り簡単に解読できた(以下)
+
+  1. huffman coding により復号した文字を環状バッファ dtext に書き込む
+     通常の文字 c は、c < 256 で表現されている(つまりそのまま)
+
+  2. 通常の文字でないものが現れたら、それは長さである。長さ len は、
+     len > 255 で表現されている。len から 0xfd(253) を引いた値が
+     実際の長さを表す(-lzs- method の場合は、0xfe(254)を引く)
+    「長さ」が、現れたらその直後には「位置」が書かれているのでそれを
+     読む。こうして、長さと位置のペア<len, pt>を得る
+
+     dtext から pt+1 バイト前の len バイトを読み、dtext に追加で書き込む
+
+   3. dtext が一杯(dicsiz)になったらファイルに書き出す
+
+これの繰り返しである。つまり、slide 辞書法の圧縮文は、文字 c と<len,
+pt> の並びであることがわかる。例えば、文字列 c1 c2 c1 c2 は、以下のよ
+うに表現されているはずである。(本当は、長さが 2 以下では圧縮が起こらな
+いので平文のまま出力する。長さは最低でも 3 は必要)
+
+        +----+----+--------+
+        | c1 | c2 | <2, 1> |
+        +----+----+--------+
+
+では、この構造を作成する圧縮処理について考える。slide 辞書法では、ファ
+イルから読み込んだ文字列 token が、以前に読み込んだ辞書に存在すれば
+<len, pt> のペアを出力し、存在しなければ token をそのまま出力する。読
+み込んだ token は、辞書に追加し、辞書の語が溢れたら古い情報を捨てる。
+
+何も予備知識がない状態で書けば
+
+        while (read_file(&token, tokensiz)) {
+          len = search_dict(dict, token, &pt);
+          if (len == -1) {
+            print_token(token);
+          else
+            print_pair(len, pt);
+          update_dict(dict, token);
+        }
+
+のようになるはず。ここで、tokensiz は token の最大サイズで、最長一致長
+を表す。この値が大きければ大きい程、圧縮効率は良くなるはずで、lha では、
+これは MAXMATCH{256}である。また、dict は辞書でこのサイズは lha の 
+-lh5- メソッドでは、8192 となっている。この辞書も大きければ大きい程良
+いはずだ。その方が一致文字列が見つかりやすい。(ただし、辞書が大きいと
+一致位置を示す情報 <len, pt> の情報量が増えるはずだし、速度も遅くなる
+だろう。後で検証する)
+
+で、実際にソースを見てみると(slide.c:encode())・・・、まったくこのよう
+な構造にはなってないように見える。何やらややこしいことばかりでまったく
+わからない。なぜここまでややこしいのかと泣きたくなってくるが、それは速
+度のためである(本当？)。上記のコードで、search_dict() は、単に dict か
+ら token に一致する位置を検索するだけで良さそう(実際にそれでも良い)だ
+が、これではまったく速度が出ない。このあたりの工夫が slide 辞書法のキ
+モである。
+
+そういうわけで、この部分を読み解くことにする。なお、予備知識として lha 
+では、辞書から token を探すのにハッシュが使われているらしいことを記し
+ておく。
+
+ここでは実際にデバッガで動作させながら解読するのではなく、ソースを読む
+だけで理解できるかを試すことにする。また、本文は某書(謎)のノリをマネて
+いると指摘する方がいるかもしれない・・・がまったくその通りだ。
+
+まず、そのものずばりの encode() (slide.c) を見る。以下がこの関数だが
+処理の要点だけに着目するために不要そうな部分は(現時点で予測で)削った。
+
+unsigned int
+encode()
+{
+    int lastmatchlen;
+    unsigned int lastmatchoffset;
+
+    /* (A) */
+    init_slide();  
+
+    /* (B) */
+    remainder = fread_crc(&text[dicsiz], txtsiz-dicsiz, infile);
+    encoded_origsize = remainder;
+    matchlen = THRESHOLD - 1;
+
+    pos = dicsiz;
+
+    if (matchlen > remainder) matchlen = remainder;
+
+    /* (C) */
+    hval = ((((text[dicsiz] << 5) ^ text[dicsiz + 1]) << 5) 
+            ^ text[dicsiz + 2]) & (unsigned)(HSHSIZ - 1);
+
+    /* (D) */
+    insert();
+
+    while (remainder > 0 && ! unpackable) {
+        /* (E) */
+        lastmatchlen = matchlen;  lastmatchoffset = pos - matchpos - 1;
+        --matchlen;
+
+        /* (F) */    /* (G) */
+        get_next();  match_insert();
+        if (matchlen > remainder) matchlen = remainder;
+
+        /* (H) */
+        if (matchlen > lastmatchlen || lastmatchlen < THRESHOLD) {
+            /* (H.1) */
+            encode_set.output(text[pos - 1], 0);
+            count++;
+        } else {
+            /* (H.2) */
+            encode_set.output(lastmatchlen + (UCHAR_MAX + 1 - THRESHOLD),
+               (lastmatchoffset) & (dicsiz-1) );
+            --lastmatchlen;
+
+            while (--lastmatchlen > 0) {
+                get_next();  insert();
+                count++;
+            }
+            get_next();
+            matchlen = THRESHOLD - 1;
+            match_insert();
+            if (matchlen > remainder) matchlen = remainder;
+        }
+    }
+}
+
+まず、この関数から概観を見てみると、ループの前に初期化処理として
+以下が行われている。
+
+(A) init_slide() 初期化する
+(B) ファイルを読み込み text[] に格納する。
+(C) ハッシュ値 hval を計算する。
+(D) insert() する (きっと辞書に token を追加しているのだろう)
+
+そして、ループ処理では以下の処理が行われている
+
+(E) lastmatchlen, lastmatchoffset, matchlen を更新する。
+(F) get_next()  (次の token を読む。たぶん)
+(G) match_insert()  (辞書に追加する。たぶん)
+
+(H) matchlen > lastmatchlen || lastmatchlen < THRESHOLD なら
+
+(H.1) output() する。(マッチしなかったらそのまま出力しているのだろう。たぶん)
+(H.2) そうでなければ(マッチしたなら)、output()し、何かいろいろする。
+
+現時点で、(H.2) の部分はよく解読できなかった。何やら再度 get_next() が
+呼ばれていたりして思った通りの処理フローにはなっていない。だが、ここで
+は焦らず放置することにして、ここまで予想で書いた部分の細部に触れること
+にする(単にここまでの予想が間違っているだけかもしれないのだから、わか
+らない部分を無理にわかるように頑張る必要はなかろう)
+
+関数の細部に触れる前にデータ構造について調べておく。データ構造に対して
+の理解が深まればアルゴリズムの80%は分かったも同然だ(誇張)。slide.c で
+使用されているデータ構造は以下の通りだ。(不要そうだと思うものは除いて
+ある)
+
+static unsigned int *hash;
+static unsigned int *prev;
+unsigned char *too_flag;
+static unsigned int txtsiz;
+static unsigned long dicsiz;
+static unsigned int hval;
+static int matchlen;
+static unsigned int matchpos;
+static unsigned int pos;
+static unsigned int remainder;
+
+too_flag だけ、static がついてないが、他のソースを grep してもこの変数
+を使っている箇所はない、単に static の付け忘れだろう。
+
+これらの変数は、encode() の冒頭 init_slide() で初期化されている・・の
+かと思ったら違った。slide.c:encode_alloc() で行われている。
+
+int
+encode_alloc(method)
+    int method;
+{
+    if (method == LZHUFF1_METHOD_NUM) { /* Changed N.Watazaki */
+        encode_set = encode_define[0];
+        maxmatch = 60;
+        dicbit = 12;   /* 12 Changed N.Watazaki */
+    } else { /* method LH4(12),LH5(13),LH6(15) */
+        encode_set = encode_define[1];
+        maxmatch = MAXMATCH;
+        if (method == LZHUFF7_METHOD_NUM)
+            dicbit = MAX_DICBIT; /* 16 bits */
+        else if (method == LZHUFF6_METHOD_NUM)
+            dicbit = MAX_DICBIT-1;      /* 15 bits */
+        else /* LH5  LH4 is not used */
+            dicbit = MAX_DICBIT - 3;    /* 13 bits */
+    }
+
+    dicsiz = (((unsigned long)1) << dicbit);
+    txtsiz = dicsiz*2+maxmatch;
+
+    if (hash) return method;
+
+    if (alloc_buf() == NULL) exit(207); /* I don't know this 207. */
+
+    hash = (unsigned int*)malloc(HSHSIZ * sizeof(unsigned int));
+    prev = (unsigned int*)malloc(DICSIZ * sizeof(unsigned int));
+    text = (unsigned char*)malloc(TXTSIZ);
+    too_flag = (unsigned char*)malloc(HSHSIZ);
+
+    if (hash == NULL || prev == NULL || text == NULL || too_flag == NULL)
+        exit(207);
+
+    return method;
+}
+
+引数に渡された method (これは、lh1, lh5, lh6, lh7 などを示す)によって、
+初期化される内容が変わる(encode_alloc()前半部分)。このことから各変数の
+用途もわかる。
+
+        method  maxmatch     dicbit
+        ----------------------------
+        -lh1-       60         12
+        -lh5-      256         13
+        -lh6-      256         15
+        -lh7-      256         16
+
+ということらしい。dicbit というのは辞書サイズのbitサイズで、辞書サイズ
+は 2^dicbit で表されている。lh5 が 8KB(2^13)、lh6 が 32KB(2^15)、lh7 
+が 64KB(2^16) の辞書サイズを利用すると言うのは予備知識である。maxmatch 
+というのは、token の最長一致長である。このことも予備知識として詳細には
+触れない。(ところで、本書では当面、lh5, 6, 7 のことしか言及しない)
+
+encode_set, encode_define というのがあるが、method によって、Huffman
+coding の方法を変えていることはちょっと見ればすぐにわかるし、大したこ
+とではない。以降無視する。
+
+encode_alloc() の後半では、他の変数の初期化(バッファの割り当て)が行われる。
+
+    dicsiz = (((unsigned long)1) << dicbit);
+
+dicsiz はそのものずばり辞書サイズである。
+
+    txtsiz = dicsiz*2+maxmatch;
+
+現時点で txtsiz が何なのかはわからない。
+
+    if (hash) return method;
+
+hash はこの直後で割り当てられる。つまり、一度割当を行ったら、
+encode_alloc() は、以降メモリの割当を行わない。ただそれだけだ。
+
+    if (alloc_buf() == NULL) exit(207); /* I don't know this 207. */
+
+alloc_buf() は、huf.c で定義された関数。このことから Huffman coding の
+ためのバッファを割り当てているのだろう。ここでは無視。(しかし、207 と
+いうのは何なのだろう？)
+
+    hash = (unsigned int*)malloc(HSHSIZ * sizeof(unsigned int));
+    prev = (unsigned int*)malloc(DICSIZ * sizeof(unsigned int));
+    text = (unsigned char*)malloc(TXTSIZ);
+    too_flag = (unsigned char*)malloc(HSHSIZ);
+
+    if (hash == NULL || prev == NULL || text == NULL || too_flag == NULL)
+        exit(207);
+
+hash は、ハッシュ用の何か、HSHSIZ は、固定値で 2^15 である。
+
+prev は、DICSIZから辞書だろう。要素の型が char でなく int であることに
+も注目しておく。DICSIZ は dicsiz でも構わないはず。単に「大は小を兼ね
+る」を実践しているだけであろう、TXTSIZ も同様である。おそらく、一度の
+実行で複数の圧縮メソッドを使用した場合、そのメソッド毎に領域を割り当て
+るよりは最大の値をあらかじめ一度だけ割り当てた方が良いと考えたのだろう。
+しかし、ソースを参照するときは繁雑になるので以降、
+   DICSIZ == dicsiz
+   TXTSIZ == txtsiz
+であるとする。これ重要。
+
+text は、現時点では不明
+
+too_flag も不明
+
+っとなる。まだ、良く分からないが、以下の図を書いておこう。後で何度も見
+ることになるだろう。この図はスケールが lh7 の場合を想定しているが。こ
+のことは大したことではないはずだ。また、too_flag と hash のスケールが
+一緒だがこれはサイズ(領域のバイト数)が一緒なのではなく、要素数が一緒で
+あることを示している。ほとんどの場合要素の型の違いというのは処理内容に
+とって重要なことではないはずだ。
+
+----------------------------------------------------------------------------
+
+       0            2^15=32768
+       +-------------+
+  hash |             |
+       +-------------+          dicsiz=2^dicbit
+       +-------------+-------------+                          2*2^dicbit
+  prev |             |             |                           |
+       +-------------+-------------+                           v   txtsiz
+       +-------------+-------------+-------------+-------------+---+
+  text |             |             |             |             |   |
+       +-------------+-------------+-------------+-------------+---+
+                                                               <--->
+                                                                maxmatch{256}
+  too_flag           2^15
+       +-------------+
+       |             |
+       +-------------+
+----------------------------------------------------------------------------
+
+
+先に示した変数の中でまだ初期化には現れていないものがある。列挙すると
+
+static unsigned int hval;
+static int matchlen;
+static unsigned int matchpos;
+static unsigned int pos;
+static unsigned int remainder;
+
+だ、ざっとソースを眺めると slide.c:insert() という関数に
+        hash[hval] = pos;
+というのが現れているから、hval は、hash[] の位置を指し、hash には、pos 
+を格納すると推測される。同様に
+        prev[pos & (dicsiz - 1)] = hash[hval];
+というのも現れているから pos は、prev[] の位置を指し、prev には、
+hash[hval] つまり、pos を格納しているようだ。これは少し謎な処理だが、
+insert() の全貌は短い(というかこれだけ)なので、ちょっと横道にそれて詳
+細に見てみよう。(現在の解析の趣旨は、変数の用途の概要を予想すること)
+
+/* 現在の文字列をチェーンに追加する */
+
+static void insert()
+{
+    prev[pos & (dicsiz - 1)] = hash[hval];
+    hash[hval] = pos;
+}
+
+コメントはまったく意味不明だが、無視して処理内容に着目する。prev[] の
+インデックス pos & (dicsiz - 1) は、dicsiz が 2^n であることからdicsiz 
+はビットマスクであることがわかる。例えば仮に dicsiz が 2^8 だと
+dicsiz - 1 は、
+
+               8 7 6 5 4 3 2 1 0 bit
+      --------------------------
+      dicsiz   1 0 0 0 0 0 0 0 0
+      dicsiz-1   1 1 1 1 1 1 1 1
+
+である。このすべて 1 が立ったビットマスクと pos を & すると、どのよう
+な pos の値に対しても pos & (dicsiz - 1) は、prev[] のインデックスの範
+囲に納まる。もう少し言うと pos が仮にインデックスの最大値+1だった場合、
+pos & (dicsiz - 1) は、0 になる。これにより次の予想が立つ。
+
+  o pos が、prev[] の位置を指すのではなく、pos & (dicsiz - 1) が
+    prev[]の位置を指す。(pos は、このインデックスの範囲を越える可能性がある)
+  o それに反して、prev[] は環状バッファらしいという予想が立てばやはり
+    pos は、prev のインデックスである。
+
+prev が環状バッファであると予想が付けば話が早い。pos & (dicsiz-1) は、
+pos と同義だと解釈可能だからである(prev が環状バッファでなく無限長のバッ
+ファであると想像しよう)そして、pos & (dicsiz-1) を pos に置き換えて、
+再度処理内容に着目すると
+
+    prev[pos] = hash[hval];
+    hash[hval] = pos;
+
+ということから、
+    1. (この関数に来る前に) pos が更新される。(予想)
+    2. prev[pos] に以前の hash[hval] (以前の pos)を格納する
+    3. hash[hval] に新しい pos を書く。
+といった処理であることが予想される。コメントの「チェーン」もなんとなく
+納得できる。新たな事実(まだ予想だが)が分かったので、図に書き記そう。
+
+----------------------------------------------------------------------------
+       0            2^15=32768
+       +-+---+-------+
+  hash | |pos|...    |
+       +-+---+-------+
+         `-hval
+
+              .-----------.
+             v            |
+       +----+-----+--------------------
+  prev |    |pppos|      |ppos|        . . .
+       +----+-----+--------------------
+            `- ppos      `-pos
+
+  * hash の取り得る値は pos その位置は hval
+  * ppos は以前の pos を示す。pppos はさらに以前の pos を指す。
+  * prev は無限長のバッファ(本当は環状バッファ)
+----------------------------------------------------------------------------
+
+まだ、解析できてない変数が残っている。
+
+static int matchlen;
+static unsigned int matchpos;
+static unsigned int remainder;
+
+しかしこれらはどうにもパッと見ではわからない。処理内容を追いかけないと
+だめそうだ。仕方ないので変数名で予想しよう。(幸い前の変数名と違って予
+想しやすい)以下
+
+----------------------------------------------------------------------------
+ * matchlen     一致した文字列長
+ * matchpos     一致した辞書上の位置
+ * remainder    token の残りサイズ
+----------------------------------------------------------------------------
+
+はたして、予想はあっているのか、今はまだ分からない。
+
+slide.c を見る限りデータ構造は網羅できた。結局分かったのか分からないの
+か良く分からないが少しずつでも前進はしているはずだ。ここで、再度 
+encode() の処理を追いかけよう。今度は細部にも着目する。
+
+前に、encode() のソースには (A) 〜 (H) までの記号を記した。この順番に
+解析を進めよう。
+
+    /* (A) */
+    init_slide();  
+
+まあ、初期化である。内容を見てみると
+
+    for (i = 0; i < HSHSIZ; i++) {
+        hash[i] = NIL;
+        too_flag[i] = 0;
+    }
+
+だけである。NIL というのは、0 であると slide.c で定義されている。普通
+このような初期値は、通常の値が取り得ない値を示している。NIL が 0 なら 
+hash[] に格納される pos は 0 にならない可能性がある。まあ、予想ばかり
+書いても仕方ないので、この関数は終ろう。余談だが、nil は null と同じで。
+「ない」の意味だが、NULL がC言語ではポインタだから。別のマクロ名にした
+のかも知れない。いずれにしてもこの程度はマクロにする必要もなかろうとは
+思うのは、余計なお世話かもしれない。
+
+    /* (B) */
+    remainder = fread_crc(&text[dicsiz], txtsiz-dicsiz, infile);
+    encoded_origsize = remainder;
+    matchlen = THRESHOLD - 1;
+
+    pos = dicsiz;
+
+    if (matchlen > remainder) matchlen = remainder;
+
+ファイルを読み込み、各変数の初期値を設定している。注目すべきはファイル
+を読み込んだバッファの位置である。fread_crc() は、crcio.c で定義された
+汎用関数で、CRC値を計算したり漢字コード変換をしたりを除けば、fread() 
+と同じである。つまり、ファイルは最初、
+
+  &text[dicsiz] の位置に、txtsiz-dicsiz 分だけ読まれる。
+
+ことを示す。図示しよう。
+
+----------------------------------------------------------------------------
+< 初期状態 >
+
+                                dicsiz=2^dicbit               2*2^dicbit
+                                   v                           v   txtsiz
+       +-------------+-------------+-------------+-------------+---+
+  text |             |             |             |             |   |
+       +-------------+-------------+-------------+-------------+---+
+                                   `-pos                       <--->
+                                                                maxmatch{256}
+
+                                   <------ remainder -------------->
+
+                                   |--- この位置に最初の  ---------|
+                                        データが読まれている
+----------------------------------------------------------------------------
+
+ますます、text[] の用途が不明だが、slide 辞書法の典型的な読み込み処理
+のことを考えるとある程度予想がつく(それを先に示した方が良いか？)。まあ、
+ここではフーンっと鼻で納得して済まそう。
+
+fread_crc() は、読み込んだバッファ長を返す。remainder がその値で、既に
+図示してある。encoded_origsize は、ソースを見ると、元のファイルのサイ
+ズを表すためだけの変数のようだ。以降は無視しよう。
+
+ところで、ファイルサイズが小さい場合図の通りにならないっと考えるかも知
+れない。その通りなのだが、例外条件は少ない方がソースは理解しやすい。単
+純な場合だけを考えた方が、あれこれ考えをめぐらす必要がないからだ。なに
+しろ既に動くソースを見ているのだから、細かいことに目をつぶってもエンバ
+グすることはないのである。そういうわけで、当面はこの図が唯一の初期状態
+であると考える。
+
+(B) の部分はもう少し注目すべき箇所がある。
+
+    matchlen = THRESHOLD - 1;
+
+matchlen は、「一致した文字列長」であると予想したが THRESHOLD の値は 3
+(固定値)であるから、matchlen の初期値は 2 だ。いきなり予想がはずれた気
+がする。予想を立て直そう。2 という謎な数値と match*len* について考える
+と、冒頭で <len, pt> のペアの len は 2 であることはないと説明した。無
+意味だからであるが、matchlen の初期値はこの 2 と関連するかもしれない。
+そこで、matchlen の用途を以下のように予想しなおすことにする。以下のよ
+うにメモを更新しよう。THRESHOLD(threshold は閾値の意)も一緒に予想した。
+
+----------------------------------------------------------------------------
+* matchlen      最低限一致しなければならない長さ-1
+* THRESHOLD     最低限一致しなければならない長さ
+----------------------------------------------------------------------------
+
+うーん、本当だろうか？
+
+(B) の残りの部分を片付けよう
+
+    pos = dicsiz;
+
+    if (matchlen > remainder) matchlen = remainder;
+
+pos が dicsiz であることからどうやら、pos は、text[] のインデックスら
+しい。前の予想で pos は、prev[] のインデックスでもあり、hash[] の値で
+もあると予想したのだが(これはもちろん間違いではなかろうが)。どうやら
+本当の意味は、処理するテキストの先頭を示しているのではないかとも思える。
+まあ、ここでは無難に「text[] のインデックス(でもある)」とだけ理解しよう。
+既に図には書き込んである。
+
+次の if だが、remainder が matchlen よりも小さい場合の条件だ。また、
+matchlen の予想が覆されそうな予感がしないでもないが、この if 文は*例外
+条件*なので無視することにした。都合の悪いことは見ない方が良いのだ。
+
+    /* (C) */
+    hval = ((((text[dicsiz] << 5) ^ text[dicsiz + 1]) << 5) 
+            ^ text[dicsiz + 2]) & (unsigned)(HSHSIZ - 1);
+
+(C) である。これは難解である。複雑な数式は苦手であるが、じっくり考えよ
+う。まず求める値は hval である。これは hash[] のインデックスなのだが、
+このような複雑な式で求まるインデックスなんて想像もつかない。まず、最初
+のインスピレーションを大事にすることにしよう。冒頭で、(C) の処理は「ハッ
+シュ値 hval を計算する。」っと苦もなく予想した。そしてこれは間違いでは
+ないだろう(きっと)。hash[] との関連をここで考えてもわからないから、こ
+のハッシュ値の計算だけを考えることにしよう。
+
+式をじっくり見てみる。。。じっくり見てみると以下のことがわかる。
+
+        x(i) = text[dicsiz + i]
+とすると
+        hval = (( x(0) << 5
+                ^ x(1)      ) << 5
+                ^ x(2)             )
+               & (unsigned)(HSHSIZ - 1);
+
+である。演算子 << は、演算子 ^ よりも優先順位が低いので余計な括弧は省
+略した。最後の & (unsigned)(HSHSIZ - 1) は、前にも似たような式が出たが
+これはある範囲の数値(ここでは、0 〜 HSHSIZ{2^15}-1)を抽出するためのビッ
+トマスクである。ハッシュ関数と言うのはある符号をある集合の符号に写像す
+る関数であるからこのようなビットマスクは当然必要だし、良く行われる事だ
+(普通は mod 素数を行うんだけど)。また、hval は、hash[] のインデックス
+なのだから、写像する集合とは hash[] のインデックスだ。おっ、案外簡単に
+わかった。x(i) が text[dicsiz + i] で、ハッシュ関数の変数は x(0),
+x(1), x(2) だから、先頭の 3 バイトの文字列(平文)のハッシュ値を求めてい
+るわけだ。その他の計算(<< 5 とか ^ とか) は大したことではない。無視し
+よう。また、続けて (D) の処理も見るが、
+
+    /* (D) */
+    insert();
+
+insert() は、幸い解読ずみである pos を hash[] に格納する処理だ。
+予想の段階では、(C) と (D) を別個の処理と考えていたのだがこれは
+どうやらセットである。
+
+   (C) pos の位置の 3 文字のハッシュ値を計算し
+   (D) hash[ハッシュ値] = pos を行う
+
+もう少し注意深く検討すると「posの位置の3文字」と、求めた「ハッシュ値」
+は論理的には = である。
+
+つまり、(C) (D) の処理は
+
+  hash[文字列] = 位置
+
+という処理を行っている。ハッシュ値の衝突はここでは考えない。slide 辞書
+法では、ある文字列に対し以前その文字列が現れたかどうかを検索し、その位
+置を求める必要があるのだが、この最初の 3 文字に関しては現時点でその用
+件(位置を求める)を満たす事ができている。ここまでで自ずと encode() の全
+体像も予想がつきそうな気がする。
+
+衝突は考えないっとしたが、ちょっと考えたらすぐわかった。prev[] には、
+以前のハッシュ値で求めた文字列の位置が入っている。つまり、prev[] はハッ
+シュが衝突したときのためのバッファだ。このハッシュはチェーン法だ。
+
+例えば、insert() で、
+    prev[pos] = hash[hval];
+    hash[hval] = pos;
+っと処理をしているのだから
+
+        hash[hval] = pos1
+                      |
+                      v
+                prev[pos1] = pos2
+                              |
+                              v
+                         prev[pos2] = pos3
+                                ...
+
+といった値が入る事になる。ある文字列(のハッシュ値) hval に対して、その
+辞書上の位置は pos1, pos2, pos3 という候補があるわけだ。実際にどの pos
+を選ぶかは比較によって行われるのだろう。
+
+# それにつけても、(C) と (D) の部分を見るだけでもこのソースがちょっと
+# 汚いことがわかる。もう少し、引数とか戻り値とか考えてくれても良かっ
+# たはずだ。ハッシュ関数にしても少なくともマクロぐらいにはしようよ。
+
+(E) 〜 (H) に移ろうこれはループの中身で、処理の本題だ。まずループの脱
+出条件を見てみると
+
+    while (remainder > 0 && ! unpackable) {
+
+remainder は、バッファ上に読み込んだ平文の長さであるからこれがなくなる
+までループすることになる。さらに unpackable というのは、crcio.c の 
+putcode() でその値を設定している箇所が出て来るのだが、符号化した出力サ
+イズが元のサイズを越えたときに真になる。つまり、これ以上処理しても圧縮
+の意味がないとわかったらループを抜けるわけだ。
+
+では、(E)を見よう。
+
+        /* (E) */
+        lastmatchlen = matchlen;  lastmatchoffset = pos - matchpos - 1;
+        --matchlen;
+
+ちょっと見ただけではやはりわからない。これらの変数はまだ予想しかしてな
+いからである。が、わかるだけの情報は書きしるそう。
+
+----------------------------------------------------------------------------
+* lastmatchlen    以前の matchlen の値 (変数名から)
+* lastmatchoffset 以前マッチした位置 (変数名から)
+----------------------------------------------------------------------------
+
+以前の値をlast〜に退避し、新たな値を設定する準備をしているわけだ。そし
+て、「新たな値の設定」は、--matchlen で早速行われている。しかし、「マッ
+チした長さ」をまだ何もしてないのに -1 するというのはいったいどういうこ
+とだろう？ matchlen はループの頭で 2 に設定されている。これが 1 になっ
+た。本当の初期値は 1 なのか？
+
+----------------------------------------------------------------------------
+< 各変数の初期値 >
+
+  matchlen = 1
+  matchpos = 0
+  pos = dicsiz
+
+  lastmatchlen = 2
+  lastmatchoffset = dicsiz - 1  (pos - matchpos - 1)
+----------------------------------------------------------------------------
+
+この (E) はまた後で見る事になるだろう。
+
+(F) (G) である。また、その直後には以前にも見た境界条件がある。
+
+        /* (F) */    /* (G) */
+        get_next();  match_insert();
+        if (matchlen > remainder) matchlen = remainder;
+
+if 文 は無視して関数の中身だけを追いかけてみよう。まず、get_next() こ
+れは 次の token を取ってくる処理だと予想してある。はたしてどうだろうか？
+
+static void get_next()
+{
+    remainder--;
+    if (++pos >= txtsiz - maxmatch) {
+        update();
+    }
+    hval = ((hval << 5) ^ text[pos + 2]) & (unsigned)(HSHSIZ - 1);
+}
+
+remainder を消費し、pos を進めている。予想通りだ。ひとまず if の条件は
+無視すると、直後で hash 値を求め直している。このハッシュ関数は、以前のハッ
+シュ値を利用しているが、これは pos が以前より + 1 されていることを考え
+ると関連が見えて来る。以前のhash関数を pos の関数として書き直すと
+
+        x(pos+i) = text[pos + i]
+
+        hval(pos) = (( x(pos+0) << 5
+                     ^ x(pos+1)      ) << 5
+                     ^ x(pos+2)             )
+                    & (unsigned)(HSHSIZ - 1);
+
+であり、また、今度のハッシュ関数は、
+
+        hval(pos+1) = ( hval(pos) << 5
+                       ^ x(pos+1 + 2)  )
+                      & (unsigned)(HSHSIZ - 1);
+
+だ、繁雑なので & (HSHSIZE-1) を外すと、
+
+        hval(pos+1) = (( x(pos+0) << 5
+                       ^ x(pos+1)      ) << 5
+                       ^ x(pos+2)             ) << 5
+                       ^ x(pos+3)
+
+っとなる。この次 get_next() が呼び出されれば、
+
+        hval(pos+2) = ((( x(pos+0) << 5
+                        ^ x(pos+1)      ) << 5
+                        ^ x(pos+2)             ) << 5
+                        ^ x(pos+3)                    ) << 5
+                        ^ x(pos+4)
+
+である。順にハッシュ値を求める文字列長を増やしている。とにかく、
+get_next() は、pos を進め、remainder を縮め、新たな(以前より1文字長い) 
+文字列のハッシュ値 hval を求める関数のようだ。
+
+しかし、いつまでも hash 値の元となる文字列を伸ばしてもしょうがないだろ
+う。hval はどこかでまたリセットされるはずだ。っと思ってソースを探して
+みたがそのような箇所は見当たらない。なぜだろう？考えてみる・・・最初は
+わからなかったが数式をよく見てみたらわかった。<< 5 が鍵だ、hval(pos+2) 
+の式を見ると x(pos+0) は、<< 5 が、4回も行われているつまり、20ビットの
+シフトだ。hval(pos+3) なら、25ビット、hval(pos+4) なら 30 ビットのシフ
+トだ。さすがにこれだけシフトすれば、x(pos+0)の情報は消えてもいいだろう。
+
+実際、hval は何文字分の情報を持つのだろう？hval は、unsigned int で、
+普通 32 bit であるから、6.4 文字分だろうか？いや、実際にはハッシュ値の
+計算時にHSHSIZ (15bit) でマスクをかけているから 15 bit の情報しか持た
+ない。つまり、3文字だ。ビット計算は苦手なので図示して確認しよう。
+
+                 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+          hval  |--|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+
+最初の hval(0) は、x(0), x(1), x(2) に対して、
+
+                    <---  5 -----> <---  5 -----> <---  5 ----->
+                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    x(0) <<10    --  x  x  x  x  x
+                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    x(1) << 5    --        x  x  x  x  x  x  x  x
+                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+    x(2)         --                       x  x  x  x  x  x  x  x
+                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+
+の排他的論理和である。hval(0) の時点で x(0) の情報は 5 ビット残ってい
+るが hval(1) になれば消えてしまうのは自明である。どうにも最初の文字に
+関しては 5 ビットしか情報を使用しないと言うのが気持悪いのだが、15 bit 
+サイズの変数 hval には、過去 3 文字分の情報しか保持されないのは間違い
+ない。get_next() の処理を見れば、位置 pos に対して、hval は常に pos,
+pos+1, pos+2 の情報しか持たないわけだ。これは重要だ。メモしよう
+
+----------------------------------------------------------------------------
+ * hval  hash[]のインデックス。現在位置 pos に対して、
+         text[pos], text[pos+1], text[pos+2] のハッシュ値で、論理的には
+             hval == text[pos] + text[pos+1] + text[pos+2]
+         と同義
+----------------------------------------------------------------------------
+
+ところで、前回、hval の計算とinsert() はセットだと言った。今回はどうだ
+ろう？次の match_insert() を見てみる。
+
+static void match_insert()
+{
+    ... 省略 ...
+
+    prev[pos & (dicsiz - 1)] = hash[hval];
+    hash[hval] = pos;
+}
+
+・・・強敵であった。強敵すぎたので逃げて、最後の2 行だけに着目した。こ
+れは、insert()と同じだ。予想は当たっている。get_next() で hval を更新
+した後は、この match_insert() で、prev[] と hash[] を更新するわけだ。
+そして、match_insert() の省略した部分は、どうやら matchpos, matchlen,
+too_flag を更新しているだけのようだ。これが本当なら match_insert()で、
+insert()の処理をせず、関数を分けるかした方が良さそうだ。(真偽の程は詳
+細を見てからになる)
+
+おもむろに後続の処理 (H) を見ると、
+
+        /* (H) */
+        if (matchlen > lastmatchlen || lastmatchlen < THRESHOLD) {
+
+これが真なら「見つからなかった状態」と予想した(なぜだろ？)。そして、
+lastmatchlen は初期状態では 2 である。予想した条件は逆か？ matchlen ま
+わりは予想ばかりで進めすぎた。そしてどうやら match_insert() を読みとか
+なければこの先も分からずじまいになりそうだ。
+
+このまま match_insert() を詳細に解析する事にしよう。match_insert()
+をすべて再掲する。
+
+/* 現在の文字列と最長一致する文字列を検索し、チェーンに追加する */
+
+static void match_insert()
+{
+    unsigned int scan_pos, scan_end, len;
+    unsigned char *a, *b;
+    unsigned int chain, off, h, max;
+
+    max = maxmatch; /* MAXMATCH; */
+    if (matchlen < THRESHOLD - 1) matchlen = THRESHOLD - 1;
+    matchpos = pos;
+
+    off = 0;
+    for (h = hval; too_flag[h] && off < maxmatch - THRESHOLD; ) {
+        h = ((h << 5) ^ text[pos + (++off) + 2]) & (unsigned)(HSHSIZ - 1);
+    }
+    if (off == maxmatch - THRESHOLD) off = 0;
+    for (;;) {
+        chain = 0;
+        scan_pos = hash[h];
+        scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+        while (scan_pos > scan_end) {
+            chain++;
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+                if (len > matchlen) {
+                    matchpos = scan_pos - off;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+            }
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+        }
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+        if (matchlen > off + 2 || off == 0)
+            break;
+        max = off + 2;
+        off = 0;
+        h = hval;
+    }
+    prev[pos & (dicsiz - 1)] = hash[hval];
+    hash[hval] = pos;
+}
+
+まず、初期化部分の前半
+
+    max = maxmatch; /* MAXMATCH; */
+    if (matchlen < THRESHOLD - 1) matchlen = THRESHOLD - 1;
+    matchpos = pos;
+
+    off = 0;
+
+maxmatch は、固定値で 256 だ、だから max も 256
+2行目の if 文は、これまでしつこいくらいに出て来た条件に似ているが、今
+回は条件を満たすらしい。これまでは、
+
+    if (matchlen > remainder) matchlen = remainder;
+
+という条件だった。そして今回は、
+
+    if (matchlen < THRESHOLD - 1) matchlen = THRESHOLD - 1;
+
+だから、全体的に matchlen の値は、
+
+    THRESHOLD-1 <= matchlen <= remainder
+
+つまり、
+
+              2 <= matchlen <= バッファに残ったテキスト長
+
+の範囲に納められるようだ。ここでは、matchlen は下限値を下回るので2 に
+設定される。次に matchpos, off が初期化され。以下の図の状態になる。
+(pos, remainder は、get_next() で更新されていることに注意)
+
+----------------------------------------------------------------------------
+
+                                dicsiz=2^dicbit               2*2^dicbit
+                                   v                           v   txtsiz
+       +-------------+-------------+-------------+-------------+---+
+  text |             |             |             |             |   |
+       +-------------+-------------+-------------+-------------+---+
+                                     `-pos(=dicsiz+1)          <--->
+                                       matchpos(=pos)           maxmatch{256}
+                                       off(=0)
+
+                                     <------ remainder ------------>
+
+                                   |--- この位置に最初の  ---------|
+                                        データが読まれている
+----------------------------------------------------------------------------
+
+初期化部分の後半
+
+    for (h = hval; too_flag[h] && off < maxmatch - THRESHOLD; ) {
+        h = ((h << 5) ^ text[pos + (++off) + 2]) & (unsigned)(HSHSIZ - 1);
+    }
+    if (off == maxmatch - THRESHOLD) off = 0;
+
+h は、too_flag[] が今のところすべて0だから hval だ。(too_flag は、h つ
+まり hval をインデックスに取るらしい。hash[] と同じだ。再掲はしないが
+メモに書き加えておこう)
+
+off は、pos の位置からのオフセットのようだ(h を更新する for 文の中身か
+ら)。図もその位置に書いた。最後の if 文は off が上限に達した場合に0 に
+再初期化している。よくわからないので無視しよう。for 文の中身からh や 
+off の用途はどうも先読みしたハッシュ値とその先読みの位置なのではないか
+と想像する。too_flag[] の状態によって先読みすべき値が変わるのだろうか？
+
+とにかく処理の本題に入る事にしよう。まず、この関数に現れる局所変数を列
+挙しておこう
+
+    unsigned int scan_pos, scan_end, len;
+    unsigned char *a, *b;
+    unsigned int chain, off, h, max;
+
+off, h, max はすでに出て来たので残りは
+
+  scan_pos, scan_end, len, a, b, chain
+
+だ、これだけの変数の意味を解読しなくてはならない。変数は状態を表すから、
+その数が多いと言うのはそれだけ複雑な処理だということだ。めげる。
+
+この関数のメインとなるループの中をざっと眺めてみるさらに内部にループが
+ある。ひとまず、二重ループの中身を省略しよう。
+
+    for (;;) {
+        chain = 0;
+        scan_pos = hash[h];
+        scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+
+        while (scan_pos > scan_end) {
+            chain++;
+            ... 略 ...
+        }
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+        if (matchlen > off + 2 || off == 0)
+            break;
+        max = off + 2;
+        off = 0;
+        h = hval;
+    }
+
+まず、前半部分から
+
+        chain = 0;
+        scan_pos = hash[h];
+        scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+
+chain, scan_pos, scan_end はすべて while ループに渡されるべき変数だ。
+さらに、while の後には、scan_pos, scan_end は現れないから(仮に while 
+ループが1つの関数だったとすると)これらは while ループ部の引数(入力)だ。
+この2つの変数はどうやりくりしようとも、while ループ部内の状態しか表さ
+ないので、ここでは無視しよう。
+
+while ループの後を見てみると
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+        if (matchlen > off + 2 || off == 0)
+            break;
+        max = off + 2;
+        off = 0;
+        h = hval;
+
+chain が LIMITを越えた場合、too_flag[h] = 1 としている。chain は、ざっ
+と見て、while ループのカウンタらしいが、LIMIT は 0x100 だ。どうにも例
+外条件っぽい(LIMITという名前や数値がそう思わせる)のでここでは無視しよ
+う。while ループが 256以上回る可能性がある点だけ心にとどめておこう。
+
+次の条件では、matchlen と off が条件判断されている。ということはこのど
+ちらか、あるいは両方は while ループの返り値(出力)だ。ざっと 
+match_insert()全体を見てみると off は最初とこの直後でしか更新されない
+らしい。つまり、while ループ部の返り値はmatchlen の方だ。
+この条件は for () ループの脱出条件でもある。心にとどめて、次に進む。
+
+        max = off + 2;
+        off = 0;
+        h = hval;
+
+ふむ。よくわからない。しかし注目すべき点はある。off はここで、0 になる
+がこれ以降は off の値は変わらない。つまり、off は最初は何らかの値で 
+while ループ部に渡されるが、その次からは、0 だ。この for ループが何度
+回ろうとも 0 だ。h も同じで最初は何らかの値を持つが、2回目のループ以降、
+h は hval だ。max は、off を 0 にする直前に更新しているから、h や off 
+と事なり、3つの状態を持つ、すなわち。maxmatch, off+2, 2 だ。
+
+いや、脱出条件を見てみると off == 0 なら break とある。つまり、この 
+for ループはどんなに頑張っても2回しか回らないらしい。やっぱり max も 2 
+つの状態しか持たないようだ。
+
+これで、1 回目、2回目に while ループ部に入る直前の状態が書ける。この関
+数 match_insert() は、while ループ部を1回か2回実行する処理と言うわけだ。
+
+ここで無視していた。while ループ部の入力となる scan_pos, scan_end
+もそれぞれどのような状態になるか書いておく
+
+----------------------------------------------------------------------------
+< 1回目 >
+   h = 何か
+   off = 何か
+   max = maxmatch
+
+   scan_pos = hash[h]
+   scan_end = pos + off - dicsiz  (あるいは、off)
+
+   matchlen = 2
+   matchpos = pos
+< 2回目 >
+   h = hval
+   off = 0
+   max = 前の off + 2
+
+   scan_pos = hash[hval]
+   scan_end = pos - dicsiz  (あるいは、0)
+
+   matchlen = ?
+   matchpos = ?
+----------------------------------------------------------------------------
+
+上記は一般化した場合だが、今回(初回)の場合、h や off の値は、hval であ
+り、0 だった。2回目ループのときの状態と同じである。2回のループの違いは 
+max の値がmatchpos であるか off+2 (すなわち2)であるかの違いしかないようだ。
+
+ここは、条件を少なくするためにこの場合だけにしぼって処理を考えよう。
+while ループの2回の呼び出しを行う際の状態は以下の通りに書き直せる。
+
+----------------------------------------------------------------------------
+< 1回目 >
+   h = hval
+   off = 0
+   max = maxmatch
+
+   scan_pos = hash[hval]
+   scan_end = pos - dicsiz  (あるいは、0)
+
+   matchlen = 2
+   matchpos = pos
+< 2回目 >
+   h = hval
+   off = 0
+   max = 2
+
+   scan_pos = hash[hval]
+   scan_end = pos - dicsiz  (あるいは、0)
+
+   matchlen = ?
+   matchpos = ?
+----------------------------------------------------------------------------
+
+うーん、まだ、すっきりしない。何がすっきりしないかというと scan_end の
+値だ。これが何を意味するのかがよくわからない。scan_pos は、わかるのか？
+というと、わかる。hash[hval]だから現在の文字列と同じ文字列の辞書上の位
+置だ。さらに、現時点では get_next() で、hval を更新してから insert() 
+を行っていないので、hash[hval] には何も入っていない。すなわち 0 だ。
+
+        scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+
+を考えよう。off は、0 だから
+
+        scan_end = (pos > dicsiz) ? pos - dicsiz : 0;
+
+なわけだ。さらに、posは現時点で dicbit+1 であるから、1 だ。図に書こう。
+
+----------------------------------------------------------------------------
+
+                                dicsiz=2^dicbit               2*2^dicbit
+                                   v                           v   txtsiz
+       +-------------+-------------+-------------+-------------+---+
+  text |             |             |             |             |   |
+       +-------------+-------------+-------------+-------------+---+
+       ^ ^                           `-pos(=dicsiz+1)
+       | |
+       | scan_end はこの辺(1)
+       scan_pos はこの辺(0)
+
+   h = hval
+   off = 0
+   max = 2
+
+----------------------------------------------------------------------------
+
+ついに、text[] バッファの左半分に指しかかる。これが何なのかは現時点で
+は明確に書いてなかったが予想するとこの左半分はズバリ辞書だ。言い切って
+やろう。今まで辞書らしい(dicsizのサイズを持つ)バッファは hash[] や 
+prev[] があったが、hash[], prev[] の用途はもう明確である。辞書となり得
+るバッファはもうこの text[] しかないのだ。
+
+さらに、左半分に限らずこの text[] 全体が辞書であろうと予想する。これは
+ただの勘だが text[] は環状バッファなのではなかろうかと考えている。
+
+# 最初の方で prev[] が辞書だと予想したが間違った予想をしていたことにこ
+# の時点で気づいた。prev[] が辞書と同じサイズを持つ理由はまだよくわか
+# らない。
+
+この時点ではまだ scan_pos や scan_end の真の意味はわからない。off のこ
+とを無視しているから予想も立ちにくいが、ひとまず初期状態がどういったも
+のかはわかったのでこのまま、while ループ部を見てみたいと思う。
+
+        while (scan_pos > scan_end) {
+            chain++;
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+                if (len > matchlen) {
+                    matchpos = scan_pos - off;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+            }
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+        }
+
+まず、if 文の条件を満たさない場合だけを考える。
+
+        while (scan_pos > scan_end) {
+            chain++;
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+                ...
+            }
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+        }
+
+
+offは 0 なので、text[scan_pos + matchlen] != text[pos + matchlen] とい
+う条件の場合を想定するわけだが、
+
+text[scan_pos + matchlen]
+
+と
+
+text[pos + matchlen]
+
+を比べている
+
+text[scan_pos]  辞書上の文字列の*先頭*
+text[pos]       現在の文字列の*先頭*
+
+を比べないのは matchlen が前に予想した「最低限一致しなければならない長さ-1」
+だからであろう。現時点で、matchlen が 2 だから
+
+text[scan_pos + 0] == text[pos + 0]
+text[scan_pos + 1] == text[pos + 1]
+
+であったとしても、
+
+text[scan_pos + 2] != text[pos + 2]
+
+であれば、「最低限一致しなければならない長さ」という条件を満たさないの
+である。なので matchlen の位置から先に比較して無駄な比較をしないように
+している。後でちゃんとした比較の処理が出て来るだろう。このような処理は
+処理としては効率が良いのだが、ことソース理解と言う点では冗長である。わ
+かりにくいのだ。仕方ないのだけど。
+
+# matchlen の意味の予想はどうやら当たっているようだ。matchlen は最短一
+# 致長で、minmatchlen っと名付けても良さそうな変数だ。
+
+そして、比較に失敗したら scan_pos を更新する。
+
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+
+ハッシュのチェーンをたどっている、つまり次の候補を辞書から取り出してい
+るわけだ。ここまでで、while ループの処理内容の想像はついた。このループ
+は辞書から(最長)一致する文字列を探しているのだろう。
+
+順番が前後したが、while ループの脱出条件を見てみる
+
+        while (scan_pos > scan_end) {
+
+これはどういうことだろう？ scan_pos は、ハッシュのチェーンをたどって同
+じハッシュ値を持つ文字列の位置を探す、この値はだんだんと小さくなって行
+くものなのだろうか？
+その通りである。hash[] への格納はファイルから取って来た文字列を順に格
+納して行くのでチェーンの奥には、より前の方の位置が書かれているはずだ。
+逆にチェーンの浅い部分にはより現在位置に近い位置が書かれているのだろ
+う。では、その境界 scan_end はどうやってわかるのだろうか？これは後でま
+た検証しよう。
+
+では、処理の本質 if 文の中を見る事にしよう
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+                if (len > matchlen) {
+                    matchpos = scan_pos - off;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+            }
+
+最初の意味もなくブロックになっている部分を見る、
+
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+この処理では a, b といういかにも局所な名前の変数が使われている。これは、
+本当にこのブロック内で局所的なもののようだ。ならば定義位置もこのブロッ
+ク内にして本当に局所的にして欲しかった。
+
+さらに、この処理は単に文字列 a, b を比較しているだけのようだ。memcmp() 
+ではまずいのかと言うとここで求めているものが「どこまで一致したか(len)」
+のようなので、memcmp() では役不足だ。
+
+その次の処理、
+
+                if (len > matchlen) {
+                    matchpos = scan_pos - off;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+
+で、matchlen (最低一致長)より大きい場合に条件を満たす。条件を満たさな
+ければ、scan_pos を更新し、次のループに移る。では、条件を満たす場合を
+見てみよう。まず最短一致長の一致条件を満たした場合、matchpos と 
+matchlen を更新する。
+
+matchpos はマッチした位置、
+matchlen はマッチした長さ
+
+で、matchlen が max なら最長一致長に達しているので、これ以上探索はしな
+い。matchlen は最短一致長でありながら、一致長でもある変数のようだ。
+(どうやら以前の2つの予想はどちらも当たっていた模様)
+
+とにかく while ループ部の出力は、この matchpos と matchlen のようだ。
+前に書いた通りこのループは「最長一致文字列を求める処理」だ。
+
+match_insert() の全体をもう一度見てみよう。ただし、以下の書き換えを行う。
+
+o while ループ部は search_dict(pos, scan_pos, scan_end, max) という関数
+  に置き換えたものとする。
+
+o 末尾の insert() と同等の処理を行っている部分も insert() の呼び出しに
+  すり替えよう。(match_insert() 関数の中で insert() 処理を本当に行うべ
+  きものなのかどうかが疑問だが)
+
+o chain という変数にかかわる処理も隠した(search_dict内で行う)
+
+o for ループは、2回しかまわらないので、2 度の search_dict() の呼び出し
+  に書き換える
+
+static void match_insert()
+{
+    unsigned int off, h;
+    unsigned int scan_end;
+
+    if (matchlen < THRESHOLD - 1) matchlen = THRESHOLD - 1;
+    matchpos = pos;
+
+    off = 0;
+    for (h = hval; too_flag[h] && off < maxmatch - THRESHOLD; ) {
+        h = ((h << 5) ^ text[pos + (++off) + 2]) & (unsigned)(HSHSIZ - 1);
+    }
+    if (off == maxmatch - THRESHOLD)
+        off = 0;
+
+    scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+    search_dict(pos, hash[h], scan_end, maxmatch);
+
+    if (off > 0 && matchlen <= off + 2) {
+      off = 0;
+
+      scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+      search_dict(pos, hash[hval], scan_end, off+2);
+    }
+
+    insert();
+}
+
+だいぶすっきりした(が、まだ繁雑だ)。まだ、off にかかわる部分がよく分か
+らないが、ひとまず良いだろう。この関数の解析はこれで終って良いだろうか。
+
+いや、良くない。肝心の match_insert() の出力がよくわからない。この関数
+は「最長一致文字列を探し、hash を更新する処理」(くどいようだが、hashを
+更新するは余計に思う)なのだろうが、最長一致文字列が見つからなかったと
+いうのはどう判断されるのだろう？
+
+まず、search_dict() で見つからなかった場合、matchlen は更新されない
+(matchpos は、pos になる)。そして、おそらく 2 度目の search_dict() の
+呼び出しが行われる。が、too_flag[] というので、判断できそうな気もする
+がこれはむしろハッシュのチェーンをたどりすぎるのを止めるためのフラグで
+あるように思える。
+
+2度目の search_dict()で、max の値が変わるのが鍵だろうか？。今回の場合、
+max は 256 から 2 になる。最長一致長として 2 が限界値になると、
+search_dict() の動作は変わるだろうか？いや、やはり変わらない。どうにも
+この関数だけでは見つかったか見つからなかったかという判断はできないよう
+だ。(本当はわかっているはずなのにその情報を直接外に持ち出していない)
+
+気持悪いがやはりこの関数の解析を終え、次に移る事にしよう。
+
+(H) である。以前、
+
+(H) matchlen > lastmatchlen || lastmatchlen < THRESHOLD なら
+
+(H.1) output() する。(マッチしなかったらそのまま出力しているのだろう。たぶん)
+(H.2) そうでなければ(マッチしたなら)、output()し、何かいろいろする。
+
+っと予想した部分だ。今や match_insert() は、解析済みだからこれの真偽が
+わかるか？というとやっぱり、わからない。ただ、
+        matchlen > lastmatchlen
+というのは、辞書から文字列が見つかった場合の条件になりそうだから、やはり
+これは予想が逆だろうか？とにかく、比較的簡単そうな、(H.1) から見よう。
+
+        if (matchlen > lastmatchlen || lastmatchlen < THRESHOLD) {
+            /* (H.1) */
+            encode_set.output(text[pos - 1], 0);
+            count++;
+        } else {
+
+どうも、文字 text[pos-1] を出力しているだけのように思える。文字の出力
+は、slide 辞書法では「辞書から見つからなかった場合」を意味するから、や
+はり最初の予想はあってそうなのだが・・・仕方ないので、output()の処理を
+覗いて見よう。これは、lh5, 6, 7 の場合、huf.c:output_st1(c, p) である。
+現時点で処理の内容を見てもわけがわからないが、結論から言うと第一引数 c 
+は、文字で、第二引数 p は、位置である。冒頭の decode 処理で、文字 c は
+長さも兼ねていると説明済みなので、(そして、text[pos-1] には現時点で文
+字そのものしか書かれていない)これはやはり文字を出力している処理だ。つ
+まり「見つからなかった場合」の処理だ。
+
+なぜ、pos-1 なのだろう？確かに Huffman coding に文字を渡すのはこれが初
+めてで、現在 pos の位置はバッファの1文字進んだ位置にある。pos-1 は出力
+しなければならないのは当然だ。ということは pos は常に「未出力文字の位
+置 + 1」なのかもしれない。
+
+次の count++ を見る。count はどうやらこの関数の変数ではないらしい、困っ
+た事に局所変数の名前っぽいがグローバル変数だ。これはよろしくない。ちょっ
+と grep しただけでは、他にどこでこの変数を使っているのかわからなかった。
+まあ、今 1 文字を渡した所なので、入力文字数なのだと仮定しておこう。こ
+の変数が大勢に影響を与える事はないだろうからこれ以上は見ないと言うのも
+アリだ。
+
+# その後、dhuf.c:decode_p_dyn() でのみ count を使用している事がわかった。
+
+次は (H.2) である。これがまた難解なのだがゆっくり片付けよう。
+
+        } else {
+            /* (H.2) */
+            encode_set.output(lastmatchlen + (UCHAR_MAX + 1 - THRESHOLD),
+               (lastmatchoffset) & (dicsiz-1) );
+            --lastmatchlen;
+
+            while (--lastmatchlen > 0) {
+                get_next();  insert();
+                count++;
+            }
+            get_next();
+            matchlen = THRESHOLD - 1;
+            match_insert();
+            if (matchlen > remainder) matchlen = remainder;
+        }
+
+まず、output() に渡している引数は、それぞれ「長さ」と「位置」であろう
+ことは予想済みだ。さらに UCHAR_MAX{255} + 1 - THRESHOLD{3} だから
+
+ 長さ  lastmatchlen + 253
+ 位置  lastmatchoffset & (dicsiz-1)
+
+となっている。冒頭の decode() の解析で、長さは 253 を足す事は確認済み
+だ(-lhs- の場合 254 を足すという動作が、encoding 部分では考慮され
+てないのは、-lhs- の encoding 機能がないからだ)。ところで、一致長 
+lastmatchlen は 3 以上で初めて 255 を越えることができる。以前予想した、
+THRESHOLD の意味「最低限一致しなければならない長さ」はあっているらしい。
+
+もう一点、注意しなくてはならないのは、出力しているのが lastmatchlen と 
+lastmatchoffset である。これらは、match_insert() のときには更新してい
+ない(last〜の更新は次のループの先頭 (E) で行われる)。先程 (H.1) のとき
+も書き出していたのは、text[pos-1] であった。pos 位置は一歩先読みした位
+置を指すらしい。このような処理を行う場合、最後に調整が必要なはずだ(で
+ないと最後の文字が出力されない)。その調整はどこで行われるのだろう？
+
+さて、後続の処理だが、<長さ、位置>のペアを出力した後は、
+
+            --lastmatchlen;
+
+            while (--lastmatchlen > 0) {
+                get_next();  insert();
+                count++;
+            }
+
+という処理を行っている。get_next() は、pos を進める処理、insert() は辞
+書に登録する処理だから、これは文字列を読み飛ばしている処理だ。確かに 
+lastmatchlen 分の情報は出力済みだから、これは納得である。lastmatchlen 
+を 1 余分に引いているのが謎だがこれは pos が一歩先に進んでいるからであ
+ろうと予想する。つまり、この後は pos の位置はまた「現在位置」に戻る。
+なるほど、先程調整が必要と書いたがここで行われているらしい。細部は不明
+だが少なくとも辞書に文字列が見つかった場合は最後まで出力されるようだ。
+
+次に進もう
+
+            get_next();
+            matchlen = THRESHOLD - 1;
+            match_insert();
+            if (matchlen > remainder) matchlen = remainder;
+
+せっかく pos が現在の位置に戻ったのに、get_next() でまた先読みされた。
+うーむ。そして、matchlen は初期化される。一致情報はすでに出力済みだか
+らこれはうなずける。そして、match_insert() が呼ばれる。この時点で再度
+辞書が検索される。pos はまた1文字進んでいるのだから、これは先程(初期状
+態)のmatch_insert() と大差ない処理だ。(その直後のif文は境界条件なので
+無視)
+
+そうして、また次のループに移る。このとき続けざま get_next(),
+match_insert() が行われる。どうやら pos は次のループからは、 2 文字文
+先に進んでしまうようだ。なぜだろう？
+
+# 後でわかった事だが、while (--lastmatchlen > 0) のループ回数を読み間
+# 違えた。例えば、lastmatchlen が 1 なら、この while ループ内では 
+# get_next() は1回も呼ばれない。
+
+どうにもソースを見ただけで解読するには、このあたりが限界のようだ。どう
+しても細部がわからないし、事実が見えないから予想の積み重ねがたまって不
+安になる。
+
+実は、もう少しマメに図を起こして読み進んで行けばもっとわかることがあっ
+ただろうと思うのだが、それは面倒だし、間違える可能性がある(ここまでで
+何度か痛い思いをした)。以降は、いくつかのデータを実際に圧縮させその動
+きをデバッガで追うことで、これまでの解析結果を検証してみよう。
+
+・・・っと、その前に、ここまでですべての関数を網羅してしまったと思って
+いたのだが、一つ忘れていたものがあった。update() だ。この関数は、
+get_next() で呼び出されていたのだが、以前は無視していた。先にここを見
+ておこう。
+
+まず、get_next() を再掲する。
+
+static void get_next()
+{
+    remainder--;
+    if (++pos >= txtsiz - maxmatch) {
+        update();
+    }
+    hval = ((hval << 5) ^ text[pos + 2]) & (unsigned)(HSHSIZ - 1);
+}
+
+remainder と pos を進めた後、pos が txtsiz - maxmatch に達してしまった
+場合(pos == 2 * 2^dicbit の場合)に呼び出されるようだ。つまり、以下の図
+の状態だ。これが、update() を呼び出す時の初期状態だ。
+
+----------------------------------------------------------------------------
+
+                                dicsiz=2^dicbit               2*2^dicbit
+                                   v                           v   txtsiz
+       +-------------+-------------+-------------+-------------+---+
+  text |             |             |             |             |   |
+       +-------------+-------------+-------------+-------------+---+
+                                                              /<--->
+                                                             /  maxmatch{256}
+                                                           pos
+
+                                                                <-->
+                                                              remainder
+
+----------------------------------------------------------------------------
+
+では、update() に入る。
+
+static void update()
+{
+    unsigned int i, j;
+    unsigned int k;
+    long n;
+
+#if 0
+    memmove(&text[0], &text[dicsiz], (unsigned)(txtsiz - dicsiz));
+#else
+    {
+        int m;
+        i = 0; j = dicsiz; m = txtsiz-dicsiz;
+        while (m-- > 0) {
+            text[i++] = text[j++];
+        }
+    }
+#endif
+    n = fread_crc(&text[(unsigned)(txtsiz - dicsiz)], 
+                               (unsigned)dicsiz, infile);
+
+    remainder += n;
+    encoded_origsize += n;
+
+    pos -= dicsiz;
+    for (i = 0; i < HSHSIZ; i++) {
+        j = hash[i];
+        hash[i] = (j > dicsiz) ? j - dicsiz : NIL;
+        too_flag[i] = 0;
+    }
+    for (i = 0; i < dicsiz; i++) {
+        j = prev[i];
+        prev[i] = (j > dicsiz) ? j - dicsiz : NIL;
+    }
+}
+
+先頭で、なぜか memmove() を for ループで書き換えている。なぜこのような
+ことを行っているのだろう。for ループを見てみてもやっていることは変わら
+ない。謎だが、とにかく、text[] の右半分(maxmatch 部分も含む) を左に移
+している。
+
+次に fread_crc() で、新たにファイルを読み込む。今度の読み込み位置は
+&text[txtsiz - dicsiz] で、長さは dicsiz である。当然、remainder も更
+新している。encoded_origsize は以前と同様無視。pos は dicsiz 分減らさ
+れている。これはつまり図示すると、以下の状態になると言う事だ
+
+----------------------------------------------------------------------------
+
+                                dicsiz=2^dicbit               2*2^dicbit
+                                   v                           v   txtsiz
+       +-------------+-------------+---+---------+-------------+---+
+  text |             |             |   |         |             |   |
+       +-------------+-------------+---+---------+-------------+---+
+                                  /<--->                       <--->
+                                 / maxmatch{256}              maxmatch{256}
+                                pos
+
+                                   <------------------------------->
+                                              remainder
+
+       |------- 以前のデータ  ---------|--- 新しいデータ  ---------|
+
+----------------------------------------------------------------------------
+
+以降、ファイルの読み込みは常にこの update()でしか行われない。pos は、
+初期状態と同じ位置なので、初期状態が再現されている。ここまでで、
+maxmatch の領域はなんだろうと思うが、おそらく先読みのためだろう。それ
+らしい処理は、match_insert() の冒頭にあった(が、現時点で詳細には触れて
+いない)。
+
+# maxmatch 分の余分な領域は、pos の位置から最大 maxmatch 長の文字列照
+# 合を行うために必要な領域。先読みとはまた見当外れなことを書いたものだ。
+# ちょっと考えればわかることなのに・・
+
+update() の残りを見る。
+
+    for (i = 0; i < HSHSIZ; i++) {
+        j = hash[i];
+        hash[i] = (j > dicsiz) ? j - dicsiz : NIL;
+        too_flag[i] = 0;
+    }
+    for (i = 0; i < dicsiz; i++) {
+        j = prev[i];
+        prev[i] = (j > dicsiz) ? j - dicsiz : NIL;
+    }
+
+内容は、想像がつくので詳細は省略しよう。単に以前のデータが移動したので、
+ハッシュ値を更新しているだけだ。しかし、これはなかなか無駄な処理だ。
+
+以前、text[] は環状バッファだろうと予想したが予想がはずれたことがわかっ
+た。環状バッファにしていれば、このハッシュの書き換えは不要にできただろ
+うと思うのだが・・・
+# そのかわり、位置の大小比較が繁雑にならないので、これはこれで良いのか
+# もしれない。どちらが優れているかは実験してみなければわからないだろう。
+
+これで、一応は slide.c を網羅する事ができた。まだ不明な点は多いが、デ
+バッガで実際の処理を追いかければまたわかることがあるだろう。
+
+・・・しばし、休息・・・
+
+さて、デバッガでと以前は考えていたのだが、あきらめるのはまだ早い(元気
+が出たらしい)、そもそも最初に「デバッガを使わずにどこまで解読できるか」っ
+と冒頭に書いてたのにたった2回の通読でもうあきらめようとしていた。が、
+ここまで書いてきた本書を何度か読み返したが、まだまだ検討の余地はある。
+
+まず、match_insert() の処理でわからなかった部分を解読しよう。実は、こ
+れに関してはどうしてもわからず悩んでいたところ、Lha for UNIX のメンテ
+ナである岡本さんに教えてもらうことができた(ありがとうございます)その内
+容を確認しつつ match_insert() を見ることにする。
+
+まずは、復習だ。通常の状態に関しては match_insert() の解読は済んでいる。
+match_insert() は、text[pos] から始まる文字列を辞書から検索し、見つかっ
+た位置と一致長を matchpos, matchlen に設定する処理だ。そして、ついでに 
+insert() で、text[pos] の位置をハッシュ配列に記録し、次回の検索に備え
+ることもしている。
+
+では、不明な部分はなんだったかというと too_flag[] まわりである。
+too_flag のフラグが立っていると。辞書検索の頼りとなるハッシュ値を変更
+している。この部分がまったく皆目検討がつかなかったのだ。これに関してソー
+スを読み進めよう。以下ソースを再掲する。
+
+static void match_insert()
+{
+    unsigned int scan_pos, scan_end, len;
+    unsigned char *a, *b;
+    unsigned int chain, off, h, max;
+
+    max = maxmatch; /* MAXMATCH; */
+    if (matchlen < THRESHOLD - 1) matchlen = THRESHOLD - 1;
+    matchpos = pos;
+
+    off = 0;
+    for (h = hval; too_flag[h] && off < maxmatch - THRESHOLD; ) {
+        h = ((h << 5) ^ text[pos + (++off) + 2]) & (unsigned)(HSHSIZ - 1);
+    }
+    if (off == maxmatch - THRESHOLD) off = 0;
+    for (;;) {
+        chain = 0;
+        scan_pos = hash[h];
+        scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+        while (scan_pos > scan_end) {
+            chain++;
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+                if (len > matchlen) {
+                    matchpos = scan_pos - off;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+            }
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+        }
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+        if (matchlen > off + 2 || off == 0)
+            break;
+        max = off + 2;
+        off = 0;
+        h = hval;
+    }
+    prev[pos & (dicsiz - 1)] = hash[hval];
+    hash[hval] = pos;
+}
+
+まず、too_flag[] は、最初すべての要素が 0 である。そして、新たにファイ
+ルを読むとき(update())も 0 に再初期化されるのだった。このフラグが立つ
+条件はというと、この match_insert() の中だけである。その処理は
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+この部分だけだ。chain が LIMIT以上になったら h (これは検索対象のハッシュ
+値だ)に関して、フラグを立てる。chain は while ループ(これは文字列の照
+合を行う処理)のループ回数だ。h に関しての検索が LIMIT{256} 以上の場合
+に too_flag[h] のフラグが立っている。
+
+while ループは一致文字列の一致長が最長一致長に達するか、辞書を最後まで
+探索するまでループする。つまり、あるハッシュ h に関してそのチェーンが 
+256 以上のものに関しては、too_flag[h] が 1 になっている。
+
+では、そのような h に関して、match_insert() がどのような処理になってい
+るかを見る。まず初期化部分
+
+    max = maxmatch; /* MAXMATCH; */
+    if (matchlen < THRESHOLD - 1) matchlen = THRESHOLD - 1;
+    matchpos = pos;
+
+これは、とりあえず無視。
+
+    off = 0;
+    for (h = hval; too_flag[h] && off < maxmatch - THRESHOLD; ) {
+        h = ((h << 5) ^ text[pos + (++off) + 2]) & (unsigned)(HSHSIZ - 1);
+    }
+    if (off == maxmatch - THRESHOLD) off = 0;
+
+通常 off は、0 なのだが、too_flag[h] が 1 であるものに関しては値が変わ
+る。検索対象となる文字列 text[pos](のハッシュ値) hval に関して、
+too_flag[h] が立っていれば、(このハッシュのチェーンが 256 以上であるこ
+とが事前にわかっていれば)
+
+        h = ((h << 5) ^ text[pos + (++off) + 2]) & (unsigned)(HSHSIZ - 1);
+
+で、検索対象となるハッシュ値を変更している。このハッシュ値が示すのは元
+の検索対象文字列の 1 文字先だ。
+
+----------------------------------------------------------------------------
+
+                           |--- c --|
+                        |--- b --|  |
+                     |-- a ---|  |  |
+       +-------------+--------+--------+
+text   |             |  |  |  |  |  |  |
+       +-------------+--------+--------+
+                      \  \
+                      pos pos+1(off=1)
+
+----------------------------------------------------------------------------
+
+元の検索対象文字列が図の a だとすると、これを図の b にしている。初期化
+部のループは、もしこの b のハッシュチェーンに関して too_flag[h] がさら
+に 1 であるならさらに 先の文字列をハッシュ値とするようになっている。
+(これは元の pos の 2 文字先を示す。図の c の部分だ) h は、pos+off から
+の3文字のハッシュ値を示すものと言う事だ。
+
+ただし、h があまりにも先の方を見るようなハメになれば(off が maxmatch -
+THRESHOLD) off は 0 に再設定されるが、このとき h はそのままだ。この意
+味はまだわからないが、バグなのではないかと想像している(h = hval に再設
+定する必要があるだろう)
+
+では off = 1 だとして本処理を見ることにしよう。外側の for ループに関し
+ては、while ループを2回実行するかどうかだけのものだった。なので、 
+while ループ部だけを見てみよう。
+
+        chain = 0;
+        scan_pos = hash[h];
+        scan_end = (pos > dicsiz) ? pos + off - dicsiz : off;
+        while (scan_pos > scan_end) {
+            chain++;
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+                if (len > matchlen) {
+                    matchpos = scan_pos - off;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+            }
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+        }
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+scan_pos, scan_end に関しては検索開始位置と終了位置と言う事でもう良い
+だろう。で、最初の if の条件に着目する。
+
+            if (text[scan_pos + matchlen - off] == text[pos + matchlen]) {
+
+これが真となる状態を図示しよう。
+
+----------------------------------------------------------------------------
+
+                                                        |-- c ---|
+                    |-- a ---|                       |--- b --|
+       +---------------+--------+--------------------+--------+--------+
+text   |               |  |x'|  |                    |  |  |x |  |  |  |
+       +---------------+--------+--------------------+--------+--------+
+                       ^                             \  \
+                      scan_pos                       pos pos+1(off=1)
+
+----------------------------------------------------------------------------
+
+まず、if 条件の左辺
+
+  text[scan_pos + matchlen - off]
+
+matchlen は、match_insert() に入る直前に 2 に初期化されている(最初は)
+ので、照合するのは図の x' だ。
+
+if 条件の右辺
+
+  text[pos + matchlen]
+
+これは、図の x の位置だ。x' == x ならば本格的に照合を開始する。
+
+                {
+                    a = text + scan_pos - off;  b = text + pos;
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+ここで比較しているのは、図の a と b だ。b は、off がどのような場合でも
+変わらないが、a は、off が大きければ大きい程左側を指す。off が例えば
+3 であるときの場合も見てみよう。
+
+----------------------------------------------------------------------------
+
+              |-- a ---|                             |--- b --|-- c ---|
+       +---------------+--------+--------------------+--------+--------+
+text   |             x'|  |  |  |                    |  |  |x |  |  |  |
+       +---------------+--------+--------------------+--------+--------+
+                       ^                              \        \
+                      scan_pos                        pos      pos+3(off=3)
+
+----------------------------------------------------------------------------
+
+結局比較しているのは、pos からの文字列のハッシュ値を求めた場合と何も変
+わらない。off でいくら先を見ようとも比較するのは pos の位置だ。なぜこ
+のようなことをするのだろうか？これは最初どうしてもわからなかったのだが、
+説明を受けて納得した。
+
+これは単に効率(速度)のためということだ。もし、図の b に関して照合文字
+列の候補があまりにも多い場合(too_flag[h]=1)、ハッシュのチェーンを何度
+もたどる事になるので効率が悪い。しかし、辞書検索のキーを何文字か進める
+事で、この可能性を減らす事ができる。少なくとも最悪の 256 よりはマシに
+なるようなものを選んでいる。そうして、この while ループのループ回数を
+減らしているのだ。どうせ探したいのは最長一致文字列なので先の方の文字列
+が一致しないと話にならないのだからこれは合理的だ。
+
+これで、外側の for ループも納得だ。これは while ループをある条件でやり
+直す処理だった。
+
+        if (matchlen > off + 2 || off == 0)
+            break;
+
+最長一致長が見つかるか、あるいは off が 0 であればさっさとこの処理は終
+るのだが、もし off を進めて照合を行っていたとして、最長一致文字列が見
+つからなかったとすると
+
+        max = off + 2;
+        off = 0;
+        h = hval;
+
+という条件で照合をやり直す。これは元の文字列で照合をやり直すということ
+だからつまりは、最悪のハッシュチェーンを仕方ないから辿り直そうと言う事
+だ。さらに、pos から pos+off+3 までの文字列が、辞書から見つからなかっ
+たので、最大一致長を off + 2 として条件を緩めている(なぜこれが条件を緩
+める事になるかと言うと while ループは最大一致長の文字列が見つかったら
+すぐに抜けるからだ)。
+
+ところで、match_insert() の先の処理は以下の書き換えを行うともう少し見
+やすくなる。(と思う)。
+
+o scan_beg という変数を用意し、これを scan_pos - off にする。
+o scan_end は、pos - dicsiz にする。
+o while 条件を while (scan_pos != NIL && scan_beg > scan_end) にする。
+
+以下
+
+        unsigned int scan_pos = hash[h];
+        int scan_beg = scan_pos - off;
+        int scan_end = pos - dicsiz;
+
+        chain = 0;
+        while (scan_pos != NIL && scan_beg > scan_end) {
+            chain++;
+
+            if (text[scan_beg + matchlen] == text[pos + matchlen]) {
+                {
+                    unsigned char *a = &text[scan_beg];
+                    unsigned char *b = &text[pos];
+
+                    for (len = 0; len < max && *a++ == *b++; len++);
+                }
+
+                if (len > matchlen) {
+                    matchpos = scan_beg;
+                    if ((matchlen = len) == max) {
+                        break;
+                    }
+                }
+            }
+            scan_pos = prev[scan_pos & (dicsiz - 1)];
+            scan_beg = scan_pos - off;
+        }
+
+        if (chain >= LIMIT)
+            too_flag[h] = 1;
+
+----------------------------------------------------------------------------
+
+              |-- a ---|                             |--- b --|
+       +---------------+--------+--------------------+--------+--------+
+text   |      |      x'|  |  |  |                    |  |  |x |  |  |  |
+       +---------------+--------+--------------------+--------+--------+
+         ^     \        \                             \        \
+         |    scan_beg  scan_pos                        pos      pos+off
+     scan_end
+
+         |----|
+           scan_beg の有効範囲
+
+         |----------------- dicsiz ------------------|
+
+----------------------------------------------------------------------------
+
+scan_beg, scan_end の範囲もわかりやすいし、hash[h] が NIL の場合の処理
+も明示的だ。この書き換えを行う場合、scan_beg が負の値になる可能性があ
+る。元もとの処理では scan_end 等の変数を unsigned にしているので、これ
+らを int にして while 条件で負の scan_beg をはじかなければならないこと
+に注意。そうすると、scan_pos != NIL は必要なくなるのだがわかりやすさを
+追求した。
+
+これで match_insert() の解読は終りだ。match_insert() の処理とは以下の
+通りだ。
+
+----------------------------------------------------------------------------
+  match_insert() は、text[pos] から始まる文字列に一致する文字列を辞書
+  から検索し、見つかった位置と一致長を matchpos, matchlen に設定する。
+
+  もし、最長一致文字列が見つからなければ matchpos は、pos に設定され、
+  matchlen は更新されない。(実は、matchpos = pos の情報は特に使われてない)
+
+  見つかった場合、matchlen は呼び出し前の matchlen よりも大きくなる。
+  (呼び出し前では matchlen の意味は最低限一致しなくてはならない文字列
+  長で、照合条件の一つになっている)
+
+  この関数の入力は
+
+      matchlen
+      pos
+
+  出力は
+
+      matchlen
+      matchpos
+
+  といったところ。
+
+  さらに、insert() と同様の処理で、pos の位置をハッシュ配列に記録し、
+  次回の検索に備える。これはついでの処理。
+---------------------------------------------------------------------------- 
+
+これを踏まえた上で処理内容を再読しよう。(E) 〜 (H) だ。
+
+        /* (E) */
+        lastmatchlen = matchlen;  lastmatchoffset = pos - matchpos - 1;
+        --matchlen;
+
+        /* (F) */    /* (G) */
+        get_next();  match_insert();
+        if (matchlen > remainder) matchlen = remainder;
+
+        /* (H) */
+        if (matchlen > lastmatchlen || lastmatchlen < THRESHOLD) {
+            /* (H.1) */
+            encode_set.output(text[pos - 1], 0);
+            count++;
+        } else {
+
+(H) の条件とは何なのかを見る。この条件が真なら、文字列をそのまま出力す
+るのだが、素直に slide 辞書法の処理を考えればこの条件は「辞書から見つ
+からなかった場合」となる。が、実際にはもう少し複雑だ。
+
+        /* (H) */
+        if (matchlen > lastmatchlen || lastmatchlen < THRESHOLD) {
+
+matchlen は、pos の位置の文字列が見つかった辞書上の長さ
+lastmatchlen は、pos-1 の位置の文字列が見つかった辞書上の長さ
+
+であるとすると、この条件は、「pos の位置で見つかった長さが、pos-1 の位
+置で見つかった長さよりも長ければ」っとなる。
+
+これはつまり、pos-1 と pos のニ箇所に関して辞書を検索して、より長くマッ
+チする方を選ぼうとしているわけだ。matchlen の方が長いなら 1 つ前
+(pos-1)の文字はそのまま出力し、次のループに移る(もし、次の文字が
+さらに長くマッチするなら。またそのまま出力される)
+
+この条件で「見つからなかった場合」というのはどう表されているかを考える。
+もし、pos の文字列が辞書になければ pos - 1 の文字列は、どうすべきかと
+いうと「pos-1 の文字列が見つかってなければ。そのまま出力。辞書にあった
+なら <lastmatchlen, lastmatchoffset> のペアを出力」っとならなければな
+らない。
+
+lastmatchlen は、初期状態では THRESHOLD - 1 であったので、見つからなかっ
+たという条件は (H) の右側の条件 lastmatchlen < THRESHOLD でまず表され
+ている。
+
+では、例えば lastmatchlen が 5 であったとしよう。このとき (E) の処理で 
+matchlen は lastmatchlen - 1 つまり、4 に設定される。そして、match_insert()
+で次の文字列がもし辞書から見つからなければ matchlen は更新されないので
+  matchlen < lastmatchlen 
+となる。このような条件(前回見つかり、今回見つからない)場合に限り、(H.2)
+の処理が実行されるようになっている。では、(H.2) の処理を追いかけよう。
+
+まず、この状態を図示する。
+
+----------------------------------------------------------------------------
+
+                         lastmatchlen                  lastmatchlen
+                       |--          --|              |--          --|
+       +---------------+--------------+--------------+--------------+--+
+text   |               |  |  |  |  |  |              |  |  |  |  |  |  |
+       +---------------+--------------+--------------+--------------+--+
+                       ^                             |   \           \
+                      matchpos                    pos-1  pos         pos2
+
+                       |--------------------------|
+                             lastmatchoffset
+
+----------------------------------------------------------------------------
+
+
+            /* (H.2) */
+            encode_set.output(lastmatchlen + (UCHAR_MAX + 1 - THRESHOLD),
+               (lastmatchoffset) & (dicsiz-1) );
+            --lastmatchlen;
+
+            while (--lastmatchlen > 0) {
+                get_next();  insert();
+                count++;
+            }
+            get_next();
+            matchlen = THRESHOLD - 1;
+            match_insert();
+            if (matchlen > remainder) matchlen = remainder;
+        }
+
+まず、<長さ, 位置> のペアを出力する。これはいいだろう。出力する「位置」
+は0 なら 1 文字前を表すので、実際のオフセット pos - 1 - matchpos より
+も 1 小さい値になっていることに注意しておこう。
+
+そして、lastmatchlen は 1 引かれる。この場合例えば 4 になる。したがっ
+て、次のループでは 3 文字 pos が先送りされる(4 ではない)。pos は既に 1 
+文字先に進んでいるので、最初に 1 引くのはこのことを考慮している。while 
+ループが終った後はpos の位置は実際に出力した文字列の最後の文字 pos2-1 
+を指していることになる。
+
+そして、get_next() でまた 1 文字先に送る。pos は図の pos2 の位置になる。
+そして、match_insert() で、この位置の文字列を照合する。matchlen は、
+THRESHOLD - 1 に初期化されるので pos2 の位置の文字列が辞書から見つから
+なければ matchlen は、THRESHOLD-1 だ。これは初期状態と同じ状態を示すの
+で、次のループの処理も想像がつく((H) の条件の右側 lastmatchlen < THRESHOLD
+が有効になる)。では、見つかった場合はというと、次のループでさらに先 
+pos2+1 の照合結果と比較されるのでこの処理も想像がつく。
+
+最初、どうにもこの処理内容が理解できなかったのだが「現在の文字列と、次
+の文字列のそれぞれで辞書を検索し、より長く見つかった方を使う」という最
+適化を行っている事がわかってしまった後は解読は簡単だった。(実はこの事
+実も教えてもらった事だ。全然ダメじゃん)
+
+さて、これで一通りの解析は済んだわけだが、ここまでの解析内容を読み直し
+てみると、以下の点がまだひっかかる。
+
+1. ハッシュ関数は最適なのか？特に HSHSIZ{2^15} は最適なのか？
+2. too_flag[] は、実際に照合を行いループがLIMITを越えた場合に
+   設定される。しかし、ハッシュのチェーンを作る際にチェーンの
+   個数をあらかじめ数えておけば一度の探索すらも行われず。より
+   早く処理されないだろうか？
+
+現状、1, 2 とも実施してみたところ特に速度の改善は見られなかった。特に 
+1 は、微妙なところがありほとんどの書き換えは性能を悪くするだけだった。
+なかなか興味深いものがある。
+
+これは今後の課題としていずれまた検証しよう。そろそろ slide.c も飽きて
+きたのでひとまずはこれで終りにしたい。
+
+
+bit 入出力ルーチン (crcio.c)
+---------------------------
+
+これから Huffman 法の解読に移るのだが、その前準備として bit 入出力ルー
+チンの解読を行う。Huffman 法の実装では必ず bit 入出力処理が必要になる。
+LHa for UNIX ももちろん例外ではなく、Huffman 法の実装を解読するにあた
+りこの部分の処理内容ははっきりさせておいた方が良いと考えたのだ。
+
+LHa for UNIX version 1.14i では bit 入出力ルーチンは crcio.c で定義さ
+れている。(このようなファイル名に存在するのは意外な事だ。最近の LHa
+for UNIX では、私が bitio.c というファイルを設け、bit 入出力ルーチンは
+そこに切り出した)
+
+crcio.c のうち bit 入出力ルーチンは fillbuf(), getbits(), putcode(),
+putbits(), init_getbits(), init_putbits() の 6 関数だ。
+
+まず、初期化用の init_getbits(), init_putbits() を見よう。
+
+void
+init_getbits( /* void */ )
+{
+    bitbuf = 0;
+    subbitbuf = 0;
+    bitcount = 0;
+    fillbuf(2 * CHAR_BIT);
+#ifdef EUC
+    putc_euc_cache = EOF;
+#endif
+}
+
+void
+init_putbits( /* void */ )
+{
+    bitcount = CHAR_BIT;
+    subbitbuf = 0;
+    getc_euc_cache = EOF;
+}
+
+それぞれ bit 入力、bit 出力を行うための初期化処理だ。CHAR_BIT というの
+は 8 で、char 型の bit サイズを表しているらしい。詳細はわからないが初期
+状態はとにかくこれだ。ここで使用されている変数は、
+
+static unsigned char subbitbuf, bitcount;
+
+が、crcio.c で定義されており、
+
+EXTERN unsigned short bitbuf;
+
+が、lha.h で定義されている(EUC なんたらは本質ではない無視しよう)。グロー
+バル変数と言うのは忌むべきものだが、とにかく使用されている変数と初期値
+を確認したので次に移ろう。init_getbits() で、早速 fillbuf() が呼ばれて
+いる。この処理内容を見る。
+
+void
+fillbuf(n)          /* Shift bitbuf n bits left, read n bits */
+    unsigned char   n;
+{
+    /* (A) */
+    while (n > bitcount) {
+        n -= bitcount;
+        /* (B) */
+        bitbuf = (bitbuf << bitcount) + (subbitbuf >> (CHAR_BIT - bitcount));
+        /* (C) */
+        if (compsize != 0) {
+            compsize--;
+            subbitbuf = (unsigned char) getc(infile);
+        }
+        else
+            subbitbuf = 0;
+        bitcount = CHAR_BIT;
+    }
+    /* (D) */
+    bitcount -= n;
+    bitbuf = (bitbuf << n) + (subbitbuf >> (CHAR_BIT - n));
+    subbitbuf <<= n;
+}
+
+まず、初期状態として
+
+    bitbuf = 0;
+    subbitbuf = 0;
+    bitcount = 0;
+
+であり、fillbuf の引数 n には 2 * CHAR_BIT が与えられたのだった。いき
+なり while 条件を満たすのでループ部の解析を行わなくてはならなくなるが、
+ひとまずこれを無視して最後の 3 行 (D) に着目する。条件は少ない方が良い
+のだ。
+
+    /* (D) */
+    bitcount -= n;
+    bitbuf = (bitbuf << n) + (subbitbuf >> (CHAR_BIT - n));
+    subbitbuf <<= n;
+
+bitbuf << n, subbitbuf << n されているので、bitbuf, subbitbuf を n ビッ
+ト左にずらす処理のようだ。さらに bitbuf には、subbitbuf を n ビットず
+らしたときに溢れた部分を bitbuf にセットしている。っと、
+
+   (subbitbuf >> (CHAR_BIT - n))
+
+の部分を軽く説明したが、図示して確認しておこう。
+
+subbitbuf は unsigned char なので 8 bit の変数だ。
+
+----------------------------------------------------------------------------
+               7  6  5  4  3  2  1  0
+              +--+--+--+--+--+--+--+--+
+   subbitbuf  |                       |
+              +--+--+--+--+--+--+--+--+
+              <-- n -->
+----------------------------------------------------------------------------
+
+n が例えば 3 の場合、CHAR_BIT - n は、5 だから subbitbuf を 5 ビット右
+にずらした値を取っている。つまり、図の 7, 6, 5 ビット目が一番右に来る
+ようになっており、この値を bitbuf に足している。(C言語では、unsigned 
+な変数を右にシフトすると上位ビットには 0 が入る)
+
+fillbuf() の後半 3 行(いや、後半2行か)は。結局 bitbuf と subbitbuf を
+一つの bitbuf とみなして n ビット左にずらしていることがわかる。
+
+----------------------------------------------------------------------------
+<ビットバッファ全体図 (予想)>
+
+           7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0
+          +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  bitbuf  |                             |          x  y  z|
+          +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                                         \        <-- n  ->
+                                         subbitbuf
+           <-------------- bitcount ------------->
+
+----------------------------------------------------------------------------
+
+このとき、当然図の x, y, z の部分(n = 3 は例としての値だ)が空く事になる。
+bitcount という変数が n 引かれていたが、これは bit バッファ全体の有効
+なビット数を表しているのではないかと予想しておく。すなわち図の状態なら
+21 だ。while ループは(関数名から)この空き部分を埋める処理なのではない
+かと適当に予想できる。では、while ループを見よう。もう一度初期値を確認
+し、最初に行われる処理内容を見よう。
+
+最初、
+
+    bitbuf = 0;
+    subbitbuf = 0;
+    bitcount = 0;
+
+であるから、bitバッファは空っぽだ。当然 fillbuf(2 * CHAR_BIT) されると
+while 条件を満たす。きっと 16 bit だけ bitバッファが補充されるはず(つ
+まり、bitbuf いっぱい、subbitbuf 空)だ。
+
+    /* (A) */
+    while (n > bitcount) {
+        n -= bitcount;
+
+で、ビットバッファが保持する bit 数以上を要求されたので、ループに入る。
+n -= bitcount で、本当に足りない部分が何ビットなのかを得ている。ここで
+は 16 だ。次の行
+
+        /* (B) */
+        bitbuf = (bitbuf << bitcount) + (subbitbuf >> (CHAR_BIT - bitcount));
+
+これは先程も出て来た処理だ。ビットバッファ全体を bitcount 分左にずらし
+ている(ただし、まだ subbitbuf はずらされていない)。この時点で予想が少
+し覆された。8 - bitcount で subbitbuf をずらしているから bitcount は最
+大 8 の値しか持たないだろうということだ。どういうことか、考えてみる・・・
+考えてもわからなかったので次に進もう。
+
+        /* (C) */
+        if (compsize != 0) {
+            compsize--;
+            subbitbuf = (unsigned char) getc(infile);
+        }
+        else
+            subbitbuf = 0;
+        bitcount = CHAR_BIT;
+
+compsize というのが出て来たが、この値がどうあろうとも subbitbuf は8 ビッ
+ト埋められ。bitcount は 8 に設定されている。わかった bitcount は、
+subbitbuf に保持する bit 数だ。図を訂正しよう。
+
+----------------------------------------------------------------------------
+<ビットバッファ全体図>
+
+           7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0
+          +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  bitbuf  |                             |            x y z|
+          +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                                       /          <-- n  ->
+                                   subbitbuf
+                                        <-------->
+                                         bitcount
+
+----------------------------------------------------------------------------
+
+この図を踏まえてもう一度初期状態での処理内容を追いかける。
+
+まず、(A) で、subbitbuf は空なので、bitcount は 0 だ。要求した bit 数 
+n{16} より小さいのでループに入る。n は 16 のままだ。
+
+(B) で、subbitbuf に残っている bit を bitbuf にずらしている。今はまだ
+空なのでbitbuf はここでもまだ空だ。
+
+(C) で、ファイルからデータを8 ビット読む(compsize は常に0ではないと考え
+る)。bitcount は 8 になる。この時点で bitバッファ全体は subbitbuf だけ
+値が入った状態になる。
+
+次のループに移ろう。(A) で、subbitbuf はいっぱいであるが要求した n{16} 
+よりは小さいので、まだループは続く。n はここで 8 になる。
+
+(B) で、subbitbuf に残っている bit (8 bit だ)を bitbuf にずらしている。
+今度は subbitbuf 全体が bitbuf に移っているのと同じだ。(つまり、bitbuf
+= subbitbuf)
+
+(C) で、また subbitbuf は 8 bit 補充される。
+
+(A) で、n{8} > bitcount{8} は偽なのでループが終る。
+
+(D) で、subbitbuf に残っている bit はすべて bitbuf に移る。bitbuf は 16
+bit いっぱいになる。bitcount は 0 だ。
+
+この処理結果から fillbuf(n) は、bitbuf に n ビット読み込む処理だと言え
+る。引数に指定できる n が最大 16 ビットであることにも気づいて良いだろ
+う。処理内容を確認してみればわかる。
+
+ここで、subbitbuf の用途に気づいた。ファイルからの読み込みが 8 ビット
+単位でしかできないので、それを補うための保存用バッファであろう。例えば
+1 ビットだけ bitbuf を fill したければ subbitbuf に 7 bit 残し、1 bit
+だけ bitbuf に設定される(確認してみればわかる)
+
+fillbuf() がわかったので、それを利用している getbits() の内容を確認し
+よう。
+
+unsigned short
+getbits(n)
+    unsigned char   n;
+{
+    unsigned short  x;
+
+    x = bitbuf >> (2 * CHAR_BIT - n);
+    fillbuf(n);
+    return x;
+}
+
+    x = bitbuf >> (2 * CHAR_BIT - n);
+
+は、3 度も出て来たので
+
+     buf >> (sizeof(buf)*8 - n)
+
+を buf の上位 n ビットを得る式だとしてマクロにしても良いだろう。(が、
+良い名前が思い付かないのでそうはしない)。とにかく、bitbuf の上位 n ビット
+を下位 n ビットとして x に代入している。その後で、
+
+    fillbuf(n);
+
+している。n bit を x に渡したので bitbuf から上位 n ビットを捨てて、n 
+ビット補充する。ここで、bitbuf は常にいっぱいの状態になっていることが
+わかる。(ファイルの末尾付近の場合、正確に bitbuf に何ビット残っている
+かが判断できないが、種明かしをするとこのことは LHa の処理内容にとって
+はどうでもいいことだ。getbits() は decode 処理で使われるのだが、decode 
+処理は何ビットの情報を decode する必要があるかを他の情報からあらかじめ
+得ている)
+
+次に移ろう今度は putcode() だ。put の場合まずは、init_putbits() で
+初期化が行われている。その値は以下だ。
+
+    bitcount = CHAR_BIT;
+    subbitbuf = 0;
+    getc_euc_cache = EOF;
+
+getc_euc_cache は無視だ。bitcount と subbitbuf の値が設定され、bitbuf 
+は利用されない。先程とは違い subbitbuf が空なのにbitcount が 8 なので、
+bitcount の使われ方が多少異なるようだ。get の場合は、bitcount は、
+subbitbuf に保持する bit 数だったが今度は subbitbuf の空き bit 数だろ
+うと予想しておこう。
+
+そして、putcode(n, x) を見る。実はソースを見るとわかるのだが、もう一つ
+の出力ルーチン putbits() は、putcode() の呼び出しに書き換え可能だ。
+putbits() は、
+
+void
+putbits(n, x)           /* Write rightmost n bits of x */
+    unsigned char   n;
+    unsigned short  x;
+{
+    x <<= USHRT_BIT - n;
+    putcode(n, x);
+}
+
+っと書き換えられるのだ。なので、putcode() の内容を先に確認するわけだ。
+
+void
+putcode(n, x)           /* Write rightmost n bits of x */
+    unsigned char   n;
+    unsigned short  x;
+{
+    /* (A) */
+    while (n >= bitcount) {
+        n -= bitcount;
+        /* (B) */
+        subbitbuf += x >> (USHRT_BIT - bitcount);
+        x <<= bitcount;
+        /* (C) */
+        if (compsize < origsize) {
+            if (fwrite(&subbitbuf, 1, 1, outfile) == 0) {
+                /* fileerror(WTERR, outfile); */
+                fatal_error("Write error in crcio.c(putcode)\n");
+                /* exit(errno); */
+            }
+            compsize++;
+        }
+        else
+            unpackable = 1;
+        subbitbuf = 0;
+        bitcount = CHAR_BIT;
+    }
+    /* (D) */
+    subbitbuf += x >> (USHRT_BIT - bitcount);
+    bitcount -= n;
+}
+
+処理内容が fillbuf() のときと似ている。まずは、先程と同様に while 条件
+を無視して考えてみる。(D) だ。
+
+    /* (D) */
+    subbitbuf += x >> (USHRT_BIT - bitcount);
+    bitcount -= n;
+
+この式はもう 4 度目だ。まず、x の上位 bitcount ビットを得て、subbitbuf 
+に足している。bitcount は、先程 subbitbuf の空きであろうと予想したが、
+n 引かれているので、埋めた分空きが減っているわけだ。予想は当たっている
+だろう。この時点でこの関数が x の上位ビットを利用することがわかる。コ
+メントに rightmost n bits of x と書かれているが惑わされてはいけない。
+多くの場合、コメントはせいぜいヒントとしての情報でしかない。信用しては
+いけないものなのだ。(コメントはあまりデバッグされない。コメントが詳し
+ければ詳しい程コメントはエンバグしやすい。疑ってかかろう。これは本書に
+も言える。すべてを鵜のみにしてはいけないのだ)
+
+では、処理内容に移る。まずは (A)
+
+    /* (A) */
+    while (n >= bitcount) {
+        n -= bitcount;
+
+subbitbuf の空きが n 以下であればループに入る。subbitbuf 一つではn ビッ
+ト全部は賄えないからループで小刻みに処理しようということだろう(もう全
+体の処理内容の予想はついている)
+n から bitcount 引いているので、n ビットのうちこれから bitcount 分は
+処理されることをここでさっさと記録して次のループに備えている。
+
+        /* (B) */
+        subbitbuf += x >> (USHRT_BIT - bitcount);
+        x <<= bitcount;
+
+x の上位 bitcount ビットを subbitbuf に足している。subbitbuf の空きが
+これで埋まった。subbitbuf はもういっぱいだ。x を bitcount シフトするこ
+とで subbitbuf に渡した x の上位ビットを捨てている。
+
+        /* (C) */
+        if (compsize < origsize) {
+            if (fwrite(&subbitbuf, 1, 1, outfile) == 0) {
+                /* fileerror(WTERR, outfile); */
+                fatal_error("Write error in crcio.c(putcode)\n");
+                /* exit(errno); */
+            }
+            compsize++;
+        }
+        else
+            unpackable = 1;
+        subbitbuf = 0;
+        bitcount = CHAR_BIT;
+
+compsize は無視しても良い。処理の本質ではないからだが、すぐにわかるので
+一応説明すると、
+        if (compsize < origsize) {
+            ...
+        else
+            unpackable = 1;
+で、圧縮ファイルサイズが元のファイルサイズを上回ったときに
+処理を終るようになっている(unpackable = 1 して、他の箇所でこの変数を監視する。
+unpackable == 1 なら処理を中断する)
+
+とにかく (C) の時点では必ず subbitbuf がいっぱいになるので 1 バイトを
+ファイルに書き出している。その後、subbitbuf = 0, bitcount = 8 として 
+subbitbuf を空けて次のループに備えている。
+
+もういいだろう。putcode() は、論理的には x のうち上位 n ビットを出力す
+る処理だ。引数 n の上限が x の最大ビットサイズ 16 になるのは説明するま
+でもないだろう。
+
+putcode() は実装として、subbitbuf と x を一つに繋げて n bit 左にずらし
+ている処理だと考えても良い。そうして、subbitbuf がいっぱいになったらそ
+の都度(1 バイトずつ)ファイルに書き出すのだ。
+
+----------------------------------------------------------------------------
+<ビットバッファ全体図>
+
+                      <--- 左にずらす
+
+           7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0 7 6 5 4 3 2 1 0
+          +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+          |* * *          |x y z                          |
+          +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+         /               / <-n->
+      subbitbuf         x
+                 <-------->
+                  bitcount
+
+----------------------------------------------------------------------------
+
+putbits() も見よう。先程 putcode() の呼び出しに書き換えたコードを見ると
+すぐわかるが、
+
+    x <<= USHRT_BIT - n;
+    putcode(n, x);
+
+最初の式で、x の下位 n ビットを x の上位 n ビットにしている。
+そうして、putcode() を呼び出しているので、putbits(n, x) は、x
+の下位 n ビットを出力する処理だ。
+
+以上でビット入出力ルーチンは終りだ。出力に関して一つ捕捉しておくと
+putcode(), putbits() では最後の最後で subbitbuf に情報が残ったままファ
+イルに書き出されない状態になる。これを吐き出すために利用者は
+
+  putcode(7, 0)
+
+を行う必要がある。
+
+まとめよう
+
+----------------------------------------------------------------------------
+fillbuf(n)
+  bitbuf から上位 n ビットを捨てて、下位 n ビットをファイルから読み込
+  み埋める。
+
+getbits(n)
+  bitbuf の上位 n ビットを下位 n ビットとして返す。bitbuf は n ビット
+  補充される。
+
+putcode(n, x)
+  x の上位 n ビットをファイルに出力する。最後の出力時は putcode(7, 0)
+  する必要がある。
+
+putbits(n, x)
+  x の下位 n ビットをファイルに出力する。最後の出力時は putcode(7, 0)
+  する必要がある。
+
+init_getbits()
+  入力処理の初期化
+
+init_putbits()
+  出力処理の初期化
+----------------------------------------------------------------------------
+
+読み込みに関して、bitbuf のサイズが 16 ビットで常にその状態が保持され
+ているのは LHa にとって重要な事だ。decode 処理では直接 bitbuf を参照す
+る箇所がある。
+
+
+Huffman 法 (huf.c)
+------------------
+
+LHa for UNIX では、静的 Huffman 法として、shuf.c、動的 Huffman 法とし
+て dhuf.c があるらしいが、これらに関しては触れない。LHa では、これらは
+過去の版のアーカイブを解凍できるように decode のみサポートしているよう
+だ。そこで、まずは -lh4-, -lh5-, -lh6-, -lh7- で利用されている huf.c 
+の解析を中心に行うこととしたい。
+
+ところで、本書では Huffman 法がどういったものかは予備知識として既に知っ
+ているものとするが、いちおう概要を簡単に説明しておこう。
+
+以下の内容のテキストファイルがあったとする。
+
+        abcabcaba
+
+このテキストは 9 バイトあるわけだが、このファイルで使われている文字は3 
+種類しかない、a, b, c だ。だからこのファイルだけに関して言えば 1 文字
+は 2 ビットあれば表現可能である。例えば各文字に対して以下のビットを
+割り当てたとすると
+
+        文字   ビット表現
+        a      00
+        b      01
+        c      10
+
+先のテキストファイルの内容 abcabcaba は、18ビットあれば表現可能となる。
+
+さらに、出現頻度の高い文字を少ないビット数で表現し、まれにしか現れない
+文字を長いビット数で表すようにすればよりビット数を少なくできる。例えば
+
+        文字   ビット表現
+        a      0
+        b      10
+        c      11
+
+であるとすると a は 4回、bは3回、cは2回現れるので、全体は 4 + 2*3 +
+2*2 = 14 ビットで表現できることになる。これが Huffman 法の圧縮原理であ
+る。このように Huffman 法では文字をビット単位で扱うためビット入出力ルー
+チンを先に解読したわけだ。また、符号化の際はあらかじめ各文字の出現頻度
+を求めておく必要があり、復号化の際はどのビット列がどの文字に対応するか
+をあらかじめ知る必要がある。
+
+文字毎にビット長のばらつきがあるような可変長符号には以下の条件がある。
+
+   ある符号のビットパターンは、他の符号のビットパターンの開始にはなら
+   ない。
+
+というものだ。これを「語頭条件」と言うらしい。例えば、先の例では a に 
+0 を割り当てたので他の文字は必ず 1 から始まるようになっている。この条
+件を満たさなければならない理由はちょっと考えればわかる。仮に以下の間違っ
+た割当を行ったとする。
+
+        文字   ビット表現
+        a      0
+        b      10
+        c      01
+
+これだと、ビットパターン 010 が ab なのか ca なのか曖昧になるのがわか
+るだろう。
+
+文字に対応する語頭条件を満たす(最適な)ビット列を求める方法、それがハフ
+マン法だ。ハフマン法ではハフマン木という木構造を構築するのだが、そのア
+ルゴリズムは以下のとおりだ。
+
+まず、圧縮対象であるテキストに関して各文字の出現回数を数える。例えば 
+abcabcaba というテキストでは、a は 4回、bは3回、cは2回なので、
+
+        4    3    2
+        |    |    |
+        a    b    c
+
+となる。次に、出現回数の低いもの同士を一つの節に束ねる。この節は 3+2=5 
+という出現回数を持つものと考える。
+
+        4      5
+        |     / \
+        a    b   c
+
+以降さらに出現回数の低いもの同士を一つの節に束ねる操作を繰り返す。この
+例では、もう一度束ねれば終りだ。
+
+           9
+           /\
+          /  \
+         /  / \
+        a  b   c
+
+ここで、木の左側が 0 右側が 1 であるとすると。a は根から左に1つ進むだ
+けなので 0。b は、右(1)→左(0) なので、10。c は右(1)→右(1) なので、11 
+となる。実際の符号化の際は文字からビット列を求めるので葉から根にむかっ
+て逆順に辿ることになる。また、復号の際は入力のビット列に沿ってこの木を
+根から辿ることで対応する文字を求める(なので圧縮文にはこの木構造が一緒
+に情報として格納されることになる)。
+
+このようなハフマン木を作成する箇所があるかどうかを探してみたところ 
+maketree.c:make_tree() が見つかった。これは「C言語による最新アルゴリズ
+ム辞典」(奥村晴彦著、技術評論社)に載っているものとほとんど同じだ。では、
+この関数の解読から始めよう(今回の解析はボトムアップ式に行うことにしよ
+うと思う。というのもデータ構造から攻めようにもグローバル変数がたくさん
+出て来るし、処理順に追っても正直よくわからなかったからだ)
+
+この関数のあるファイル maketree.c で使用しているデータ構造は以下だ。
+
+static short    n, heapsize, heap[NC + 1];
+static unsigned short *freq, *sort;
+static unsigned char *len;
+static unsigned short len_cnt[17];
+
+make_tree() は以下。
+
+short
+make_tree(nparm, freqparm, lenparm, codeparm)
+/* make tree, calculate len[], return root */
+    int             nparm;
+    unsigned short  freqparm[];
+    unsigned char   lenparm[];
+    unsigned short  codeparm[];
+{
+    short           i, j, k, avail;
+
+    /* (A) */
+    n = nparm;
+    freq = freqparm;
+    len = lenparm;
+    avail = n;
+    /* (B) */
+    heapsize = 0;
+    heap[1] = 0;
+    for (i = 0; i < n; i++) {
+        len[i] = 0;
+        if (freq[i])
+            heap[++heapsize] = i;
+    }
+    /* (C) */
+    if (heapsize < 2) {
+        codeparm[heap[1]] = 0;
+        return heap[1];
+    }
+    /* (D) */
+    for (i = heapsize / 2; i >= 1; i--)
+        downheap(i);    /* make priority queue */
+    /* (E) */
+    sort = codeparm;
+    do {            /* while queue has at least two entries */
+        i = heap[1];    /* take out least-freq entry */
+        if (i < n)
+            *sort++ = i;
+        heap[1] = heap[heapsize--];
+        downheap(1);
+        j = heap[1];    /* next least-freq entry */
+        if (j < n)
+            *sort++ = j;
+        k = avail++;    /* generate new node */
+        freq[k] = freq[i] + freq[j];
+        heap[1] = k;
+        downheap(1);    /* put into queue */
+        left[k] = i;
+        right[k] = j;
+    } while (heapsize > 1);
+    /* (F) */
+    sort = codeparm;
+    make_len(k);
+    make_code(nparm, lenparm, codeparm);
+    return k;       /* return root */
+}
+
+この関数の引数に、nparm, freqparm, lenparm, codeparm というのがある。
+これがなんなのかいきなりではわからないだろう。実は私にもわからない。今
+回の解析で特殊なのは、処理内容については私は(アルゴリズム辞典で)知って
+いることだ。強引に無視しても処理内容から想像がつくだろうことを期待して
+いる。
+
+とりあえず、冒頭の初期化部分 (A) で
+
+    /* (A) */
+    n = nparm;
+    freq = freqparm;
+    len = lenparm;
+    avail = n;
+
+としている。引数で受けた入力をこのファイルの static 変数にセットし、他
+のルーチンとデータ共有しているようだ。avail は後で説明しよう。
+
+    /* (B) */
+    heapsize = 0;
+    heap[1] = 0;
+    for (i = 0; i < n; i++) {
+        len[i] = 0;
+        if (freq[i])
+            heap[++heapsize] = i;
+    }
+
+ここで、heap[] を初期化している。heapsize は、heap の要素数となる。こ
+の処理は優先待ち行列 heap[] を作る部分なのだが、なぜ優先待ち行列が必要
+なのかというと先の説明で Huffman 法のアルゴリズムに出現回数の少ない順
+に葉を節に束ねるという部分があった。優先待ち行列はこのためのものだ。と
+りあえず、heap[] の要素は圧縮する文字であるということだけを書いておく。
+詳細はすぐ後で出るだろう。freq[i] (すなわち引数 freqparm) は、文字 i 
+の出現回数を表している。だから、n (nparm)は、符号化するモデル上の文字
+の種類の数を表していることになる。たとえば通常のファイルなら nparm は 
+256 だろう。まあ、結局は freq[] の要素数だ。
+
+    nparm               最大要素数
+    freqparm[0:nparm]   添字が文字で、その要素が出現回数
+
+注意すべきなのは heap[] の要素は 1 以降を使用していることだろう。
+heap[0] は使われない。
+
+    /* (C) */
+    if (heapsize < 2) {
+        codeparm[heap[1]] = 0;
+        return heap[1];
+    }
+
+これは、heapsize が 0 か 1 の場合を表している。符号化する文字の種類が 
+0 または 1 つしかない場合だ。heap[1] は、(B) で 0 に初期化していたので、
+codeparm[0] = 0 として、0 を返している。これは特殊な条件を示している。
+簡単に想像がつくことだが、出現する文字の種類が1種類しかない場合、ハフ
+マン木を作る必要がない。LHa ではこのような場合に特殊な構造あるいは方法
+を用いていることが想像できる。
+
+    /* (D) */
+    for (i = heapsize / 2; i >= 1; i--)
+        downheap(i);    /* make priority queue */
+
+優先待ち行列 heap[] を構築する。downheap() がなんなのか、これがどういっ
+た処理なのかの詳細は省略しよう。アルゴリズム辞典の「ヒープソート」の項
+に詳しいが、heap[] は木構造を示しており、この木構造(2分木)には「親は子
+より優先順位が同じか高い」という規則だけがある。この木構造は、
+
+        1. heap[n] の左の子は heap[2*n]、右の子は heap[2*n + 1]
+
+で、表現されており、このような半順序木 (partial ordered tree) には、以
+下の特徴がある
+
+        2. heap[n] の親は heap[n/2]
+        3. heap[1.. heapsize/2] は節で、heap[heapsize/2 .. heapsize] は葉
+
+この heap[] が最初ばらばらに要素が格納されているとき、葉に近い節から順
+に downheap() という操作を行う((D)の処理)と、ヒープを構築できるように
+なっている。downheap(i) は、節 heap[i] とその子 heap[2*i], heap[2*i+1] 
+で要素を比較し、子の優先順位の方が高ければ位置を交換する、という処理を
+葉に向かって繰り返す関数だ。以下、参考までに maketree.c:downheap() の
+内容を示す。
+
+static void
+downheap(i)
+/* priority queue; send i-th entry down heap */
+    int             i;
+{
+    short           j, k;
+
+    k = heap[i];
+    while ((j = 2 * i) <= heapsize) {
+        if (j < heapsize && freq[heap[j]] > freq[heap[j + 1]])
+            j++;
+        if (freq[k] <= freq[heap[j]])
+            break;
+        heap[i] = heap[j];
+        i = j;
+    }
+    heap[i] = k;
+}
+
+とにかく (D) により、最も優先順位の高い(出現回数の少ない)要素が 
+heap[1] に来るようになる。この優先待ち行列はなかなか面白い(と私は思っ
+た)のでいろいろと調べてみるのもよいだろう。
+
+さて、続けよう (E) だ。
+
+    /* (E) */
+    sort = codeparm;
+    do {            /* while queue has at least two entries */
+        i = heap[1];    /* take out least-freq entry */
+        if (i < n)
+            *sort++ = i;
+        heap[1] = heap[heapsize--];
+        downheap(1);
+        j = heap[1];    /* next least-freq entry */
+        if (j < n)
+            *sort++ = j;
+        k = avail++;    /* generate new node */
+        freq[k] = freq[i] + freq[j];
+        heap[1] = k;
+        downheap(1);    /* put into queue */
+        left[k] = i;
+        right[k] = j;
+    } while (heapsize > 1);
+
+最初に、
+
+        i = heap[1];    /* take out least-freq entry */
+        if (i < n)
+            *sort++ = i;
+
+で、最も出現回数の少ない文字を取って来る。if の部分はひとまず無視しよう。
+
+        heap[1] = heap[heapsize--];
+        downheap(1);
+
+で、heap[] の最後尾の要素を先頭に持って来て downheap(1) を行っている。
+こうすると、ヒープが再構築され「親は子より優先順位が同じか高い」という
+条件をまた満たすようになる。heap[] の要素は1つ減っている。結局、ここま
+での処理は論理的には「優先待ち行列から優先度の高い要素を1つ取り出す」
+と言う処理だ。
+
+        j = heap[1];    /* next least-freq entry */
+        if (j < n)
+            *sort++ = j;
+
+続けて、2番目に優先度の高い要素を取り出す。また、if は無視しておこう。
+
+        k = avail++;    /* generate new node */
+        freq[k] = freq[i] + freq[j];
+        heap[1] = k;
+        downheap(1);    /* put into queue */
+
+avail は最初 n (nparm)だった。freq[] は、文字の出現回数なので最初文字
+の種類数分(nparm)の要素しかないがハフマン木の節の出現回数(というか優先
+順位)を格納するために freq[] は、nparm * 2 - 1 の格納域が必要となるこ
+とがわかる。(葉が n 個ある 2 分木には、節が n - 1 個ある)
+
+----------------------------------------------------------------------------
+
+     +-----------------------+-----------------------+
+freq |                       |                       |
+     +-----------------------+-----------------------+
+     0                       nparm                   nparm * 2 - 1
+
+     |-----------------------|-----------------------|
+      文字(ハフマン木の葉)    ハフマン木の節の優先順位
+      の優先順位
+
+
+      例:
+                 .     ... freq[4]
+                / \
+               .   \   ... freq[3]
+              /\    \
+             a  b    c ... freq[0 .. 2]
+
+----------------------------------------------------------------------------
+
+ここまでで、出現回数の低い2つの要素を取り出しその出現回数の和を 
+freq[k] に設定することになる。出現回数の和は heap[] に再設定され、
+downheap(1) で、優先待ち行列をまた再構築する。これは「葉を束ね節を作る」
+というハフマン木の構築アルゴリズムの実装だ。新しく作成した節が k でそ
+の最大値が最終的に avail-1 である。
+
+最後に
+
+        left[k] = i;
+        right[k] = j;
+
+で、ハフマン木を構造 left[]、right[] で作成する。
+
+この (E) を抽象度の高いコードで示してみよう。ハフマン木は
+    struct huffman {
+       ...
+    } huff;
+
+で表し、ハフマン木の1つの節は、
+    make_huff(huff, node, left, right)
+で作成できるとする。また、優先順位つき待ち行列を heap とし、heap から
+要素を取り出す処理、要素を格納する処理をそれぞれ仮に
+        n = delete_pqueue(heap)
+        insert_pqueue(heap, n)
+とすると、
+
+    /* (E) */
+    do {
+        left = delete_pqueue(heap);
+        right = delete_pqueue(heap);
+
+        node = avail++;
+        freq[node] = freq[left] + freq[right];
+
+        insert_pqueue(heap, freq[node]);
+
+        make_huff(&huff, node, left, right);
+    } while (heapsize > 1);
+
+こんなところだろうか。元の処理ではヒープからの要素の取り出しと挿入で無
+駄な処理を無くすために少し複雑になっている。(そしてデータ構造に依存し
+た処理になっている)。どちらがよりすぐれているかは微妙な所だ。私は多少
+の処理の無駄も目をつぶってよりわかりやすい方を優先するのが好きなのだが。
+これはちょっと考えさせられるところだ。
+
+ループを抜けた所で k (avail - 1) は、ハフマン木の根を表している。
+left[0:avail], right[0:avail] でハフマン木を表し、そのうち
+left[nparm...avail], right[nparm...avail] が節の子を示している。
+left[0...nparm], right[0...nparm] は使われないようだ。
+
+----------------------------------------------------------------------------
+      例:
+                 . -- k (= avail-1)
+                / \
+   left[k] --  .   \
+              /\    \
+             a  b    c -- right[k]
+             |   \
+             |    right[left[k]]
+          left[left[k]]
+
+----------------------------------------------------------------------------
+
+これで、ハフマン木の構築は終りなのだが、ハフマン法の符号化ではハフマン
+木の葉から根に向かって木を辿る必要があるはずなのに、left[]、right[] の
+構造では根から葉に向かってしか木を辿ることができないはずだ。これはどう
+いうことだろう？make_tree() ではまだ処理が続いている。
+
+    /* (F) */
+    sort = codeparm;
+    make_len(k);
+    make_code(nparm, lenparm, codeparm);
+    return k;       /* return root */
+
+どうやら、木構造の他にもなにやら構造を作成しているようだ。これは先程無
+視した if 文にも関連する。そしてこれは「アルゴリズム辞典」には載ってい
+ない部分だ。どうやら LHa なりの工夫があるようだ。
+
+まず、maketree.c:make_len(root) から見てみようと思うが、その前にこの関
+数は maketree.c:count_len(root) という関数を呼び出している。こちらから
+先に見ることにした。
+
+static void
+count_len(i)            /* call with i = root */
+    int             i;
+{
+    static unsigned char depth = 0;
+
+    if (i < n)
+        len_cnt[depth < 16 ? depth : 16]++;
+    else {
+        depth++;
+        count_len(left[i]);
+        count_len(right[i]);
+        depth--;
+    }
+}
+
+この関数に渡される i は、最初ハフマン木の根を指す値だ。この関数の全体
+を見れば、i が節や葉を示すことはすぐわかる。最初の if 文に出てくる n 
+は何かというとなんとこのファイル内の static 変数で、make_tree() の冒頭
+で nparm で初期化していた。先程は気にもとめなかったのだが、変数名の選
+び方がどうにもよろしくない。とにかく n は、nparm で、freqparm の最初の
+要素数で、文字の種類の数を表していたものだ。ここではハフマン木の節や葉
+となる i と比較していることから、i がハフマン木の節を示すか葉を示すか
+の判断に使用しているらしい。if 文の条件が真の場合(i < n)、i は葉である。
+偽の場合 i は節である。偽の場合は、depth を足して二つの子に対して再帰
+的にこの関数を呼び出している。で、結局この関数が何をしているかというと、
+先ほど構築したハフマン木に関して、ある深さの葉の数を数えているようだ。
+
+len_cnt[1] は、深さ 1 (根の子)の葉の数で 0 〜 2 の値になる。len_cnt[2] 
+は、深さ 2 (根の孫)の葉の数で 0 〜 4 の値を持つだろう。そして、深さ 16 
+以上の層に関しては len_cnt[16] にすべて計上されるようだ。とにかくその
+ような処理だということでこの関数を終え、make_len() を見よう。
+
+static void
+make_len(root)
+    int             root;
+{
+    int             i, k;
+    unsigned int    cum;
+
+    /* (A) */
+    for (i = 0; i <= 16; i++)
+        len_cnt[i] = 0;
+    count_len(root);
+    /* (B) */
+    cum = 0;
+    for (i = 16; i > 0; i--) {
+        cum += len_cnt[i] << (16 - i);
+    }
+#if (UINT_MAX != 0xffff)
+    cum &= 0xffff;
+#endif
+    /* (C) */
+    /* adjust len */
+    if (cum) {
+        fprintf(stderr, "17");
+        len_cnt[16] -= cum; /* always len_cnt[16] > cum */
+        do {
+            for (i = 15; i > 0; i--) {
+                if (len_cnt[i]) {
+                    len_cnt[i]--;
+                    len_cnt[i + 1] += 2;
+                    break;
+                }
+            }
+        } while (--cum);
+    }
+    /* (D) */
+    /* make len */
+    for (i = 16; i > 0; i--) {
+        k = len_cnt[i];
+        while (k > 0) {
+            len[*sort++] = i;
+            k--;
+        }
+    }
+}
+
+ちょっと複雑だがゆっくり見ていこう。まず (A) の初期化部分は先ほどの 
+count_len() を呼び出すだけのものなのでもうよいだろう。
+
+    /* (A) */
+    for (i = 0; i <= 16; i++)
+        len_cnt[i] = 0;
+    count_len(root);
+
+これで、len_cnt[1..16] にはハフマン木の各層の葉の数が計上される。続いて (B)
+
+    /* (B) */
+    cum = 0;
+    for (i = 16; i > 0; i--) {
+        cum += len_cnt[i] << (16 - i);
+    }
+#if (UINT_MAX != 0xffff)
+    cum &= 0xffff;
+#endif
+
+これは、どういうことだろう？len_cnt[] は short の配列だが、とにかく以
+下のような計算(len_cnt[] の要素を 1 ビットずらしながら足す)をしている。
+最後に int 型のサイズが 2 でない場合 0xffff で論理積をしているので 2バ
+イトの符号なし整数を結果として欲しいらしい。
+
+----------------------------------------------------------------------------
+                f e d c b a 9 8 7 6 5 4 3 2 1 0  bit
+  len_cnt[16]  |x|x|x|x|x|x|x|x|x|x|x|x|x|x|x|x|   (下位 16ビット)
++ len_cnt[15]  |x|x|x|x|x|x|x|x|x|x|x|x|x|x|x|0|   (下位 15ビット)
++ len_cnt[14]  |x|x|x|x|x|x|x|x|x|x|x|x|x|x|0|0|   (下位 14ビット)
++     :                                                   :
++ len_cnt[ 2]  |x|x|0|0|0|0|0|0|0|0|0|0|0|0|0|0|   (下位 2 ビット)
++ len_cnt[ 1]  |x|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|   (下位 1 ビット)
+& 0xffff       |1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|1|
+------------------------------------------------
+= cum           x x x x x x x x x x x x x x x x
+----------------------------------------------------------------------------
+
+ここで、len_cnt[] の各要素の値が各層の葉の数であることを考えると、各要
+素で使用するビット数との関連が見える。
+
+              取り得る
+              値の範囲      使用ビット数
+ -----------------------------------------
+ len_cnt[16]  0.. 2^16以上  17ビット以上
+ len_cnt[15]  0.. 2^15      16ビット
+ len_cnt[14]  0.. 2^14      15ビット
+     :
+ len_cnt[ 3]  0.. 2^3        4 ビット
+ len_cnt[ 2]  0.. 2^2        3 ビット
+ len_cnt[ 1]  0.. 2^1        2 ビット
+
+先の計算式では len_cnt[] の各要素で使用し得るビット数から 1 引いたビッ
+ト数が計算に使用されている。例えば根の子がすべて葉なら len_cnt[1] は、
+2 になり、2進で、00000000 00000010 だが、cum の計算にはこの下位 1 ビッ
+トしか使用されない。
+
+       /\
+      a  b     .. len_cnt[1] = 00000000 00000010
+                                               |
+                                               v
+                                         cum = x0000000 00000000
+
+根の孫がすべて葉なら len_cnt[2] は、4 になり、2進で、00000000 00000100 
+だが、cum の計算にはこの下位 2 ビットしか使用されない。
+
+       / \     .. len_cnt[1] = 00000000 00000000
+      /\ /\
+     a b c d   .. len_cnt[2] =  00000000 00000100
+                                               ||
+                                               vv
+                                         cum = xx000000 00000000
+
+このようにある層のすべてが葉であるようなバランスのよいハフマン木に
+対しては先の計算結果 cum は 0 になるらしい。
+
+また、
+       /\
+      a /\     .. len_cnt[1] = 00000000 00000001
+        b c    .. len_cnt[2] =  00000000 00000010
+                                               ||
+                                               vv
+                                         cum = xx000000 00000000
+
+のような木に対しても計算結果はオーバーフローされ cum は 0 になる。
+
+       /\
+      a /\       .. len_cnt[1] = 00000000 00000001
+       b /\      .. len_cnt[2] =  00000000 00000001
+        c  d     .. len_cnt[3] =   00000000 00000010
+                                                 |||
+                                                 vvv
+                                           cum = xxx00000 00000000
+
+も同様に cum は 0 だ。結局 cum が 0 にならない木とはある節が 1 つの葉
+しかもたないような場合であるらしい。
+
+       /\
+      a /\       .. len_cnt[1] = 00000000 00000001
+       b  \      .. len_cnt[2] =  00000000 00000001
+           d     .. len_cnt[3] =   00000000 00000001
+                                                 |||
+                                                 vvv
+                                           cum = 11100000 00000000
+
+そして、ハフマン木の作り方からこのようなことは起こりえないのではないか
+と思える。
+
+(C) では、if (cum) で、この起こりえないハフマン木の場合になにか処理を
+行っている。まったく謎であるが、まず、この (C) を特殊条件とみなして先
+に (D) の方を見ることにしよう。
+
+    /* (D) */
+    /* make len */
+    for (i = 16; i > 0; i--) {
+        k = len_cnt[i];
+        while (k > 0) {
+            len[*sort++] = i;
+            k--;
+        }
+    }
+
+sort は何かというと、make_tree() の引数に渡された codeparm を指してい
+る。この配列の中には(ハフマン木を構築する際に設定されていたのだが)、出
+現頻度の低い順で平文の文字コードが入っている。make_tree() で、sort に
+値を設定する際、
+
+        if (j < n)
+            *sort++ = j;
+
+のように条件判断があったので、sort[] にはハフマン木の節は入っていない。
+そしてハフマン木はその構築の仕方から出現頻度の低い文字は木のより深い場
+所に位置づけられている。これらのことから make_len()で求めようとしてい
+るものが何なのかがわかる。make_len() は、
+    len[文字] = ハフマン木の深さ
+といった対応表を作成する処理だ。さらに言うとハフマン木の深さは文字を符
+号化した結果のビット数を表すことから
+    lenparm[文字] = 符号語のビット数
+といった対応表を作成する処理であると言った方が正解だろう。
+len[] は、make_tree() の冒頭で、lenparm を指すように設定された変数なの
+で、そのように置き換えておいた。
+
+では、謎の (C) を見よう。その前に cum != 0 は起こりえないと書いたがよ
+く考えたら len_cnt[16] だけは深さ16以上の葉すべての数を計上しているた
+め、どのような値もあり得る。つまり、この (C) の処理はハフマン木が深さ 
+17 以上になったときに処理されるものだと言えそうだ。思い切って図示しよ
+う例えばこんな木は、(C)の処理対象となる。
+
+       /\
+      a /\       .. len_cnt[ 1] = 0000000000000001
+       b /\       .. len_cnt[ 2] = 0000000000000001
+        c /\       .. len_cnt[ 3] = 0000000000000001
+         d /\       .. len_cnt[ 4] = 0000000000000001
+          e /\       .. len_cnt[ 5] = 0000000000000001
+           f /\       .. len_cnt[ 6] = 0000000000000001
+            g /\       .. len_cnt[ 7] = 0000000000000001
+             h /\       .. len_cnt[ 8] = 0000000000000001
+              i /\       .. len_cnt[ 9] = 0000000000000001
+               j /\       .. len_cnt[10] = 0000000000000001
+                k /\       .. len_cnt[11] = 0000000000000001
+                 l /\       .. len_cnt[12] = 0000000000000001
+                  m /\       .. len_cnt[13] = 0000000000000001
+                   n /\       .. len_cnt[14] = 0000000000000001
+                    o /\       .. len_cnt[15] = 0000000000000001
+                     p /\       .. len_cnt[16] = 0000000000000011
+                      q  r                       ||||||||||||||||
+                                                 vvvvvvvvvvvvvvvv
+                                           cum = 0000000000000001
+
+このような木は例えば各文字が以下の出現頻度となるファイルを作成すると起
+こる(実際には、LHA の場合、slide 辞書法の処理もあるのでこれほど単純で
+はない)。
+
+        文字    頻度        文字    頻度
+        ------------        ------------
+        r          1        i        256
+        q          1        h        512
+        p          2        g       1024
+        o          4        f       2048
+        n          8        e       4096
+        m         16        d       8192
+        l         32        c      16384
+        k         64        b      32768
+        j        128        a      65536
+
+ところで、cum の値は何なのかというと、
+
+                                                        :
+                               .. len_cnt[15] = 0000000000000001
+                     p /\       .. len_cnt[16] = 0000000000000100
+                      q /\                       ||||||||||||||||
+                       r  s                      vvvvvvvvvvvvvvvv
+                                           cum = 0000000000000010
+
+この場合は cum = 2 だ。
+                                                        :
+                               .. len_cnt[15] = 0000000000000001
+                     p /\       .. len_cnt[16] = 0000000000000101
+                      q /\                       ||||||||||||||||
+                       r /\                      vvvvvvvvvvvvvvvv
+                        s  t               cum = 0000000000000011
+
+この場合は cum = 3 だ。少なくともこの例では深さ 16 以上の葉の数 - 2に
+なるらしい(そうか、11111111 11111110 = -2 を足しているのだから当然だ)。
+
+では、今度こそ (C) を見る。
+
+    /* (C) */
+    /* adjust len */
+    if (cum) {
+        fprintf(stderr, "17");
+        len_cnt[16] -= cum; /* always len_cnt[16] > cum */
+        do {
+            for (i = 15; i > 0; i--) {
+                if (len_cnt[i]) {
+                    len_cnt[i]--;
+                    len_cnt[i + 1] += 2;
+                    break;
+                }
+            }
+        } while (--cum);
+    }
+
+である。いきなり fprintf() しているところがすごい。デバッグ用の出力が
+残っているのだろう。LHa for UNIX で 17 という出力を見たことがある人は
+教えて欲しい。
+
+で・・・、結局この (C) の部分は見てもよくわからなかった。ここまで書い
+ておいてなんだが、気持ちよく無視することにした。
+
+では、make_tree() から呼び出される最後の関数、maketree.c:make_code() 
+を見よう。make_code() は、make_tree() の(F) の部分で以下のように呼ばれ
+ていた。
+
+    make_code(nparm, lenparm, codeparm);
+
+この引数のうち、lenparm[] は先ほどの make_len[] で値が作られたものだが、
+    lenparm[文字] = 符号語のビット数
+という対応表だった。codeparm[] は、先ほども出たが make_tree() の中で設
+定されているものだった。出現頻度の低い順で平文の文字コードが入った配列
+だ。
+
+void
+make_code(n, len, code)
+    int             n;
+    unsigned char   len[];
+    unsigned short  code[];
+{
+    unsigned short  weight[17]; /* 0x10000ul >> bitlen */
+    unsigned short  start[17];  /* start code */
+    unsigned short  j, k;
+    int             i;
+
+    j = 0;
+    k = 1 << (16 - 1);
+    for (i = 1; i <= 16; i++) {
+        start[i] = j;
+        j += (weight[i] = k) * len_cnt[i];
+        k >>= 1;
+    }
+    for (i = 0; i < n; i++) {
+        j = len[i];
+        code[i] = start[j];
+        start[j] += weight[j];
+    }
+}
+
+# 後で気がついたことだが、あらかじめ設定していた codeparm[] の内容はこ
+# こでは使用されない。つまり、codeparm[] は先程はワーク用のバッファと
+# して利用されていたが、ここでの codeparm[] は処理結果を表すという二つ
+# の役割がある。これは、領域を節約するための変数の使い回しだ。
+
+最初の for 文では、変数 i に対して、weight[i] が下のように設定される
+
+  weight[i=1..16] = 2^(16-i)
+
+そして、start[i] は、
+
+  start[1] = 0
+  start[n] = start[n-1] + weight[n-1] * len_cnt[n-1]   (n > 1)
+
+という漸化式だ。start[] の添字 i は、len_cnt[i](深さ i の葉の数)の添字
+でもあることから、ハフマン木の深さを表している。start が実際にどのよう
+な値を取るかと言うと、例えば len_cnt[i] の各要素が Li であった場合、
+
+     i     len_cnt[i]   weight[i]   start[i]
+ --------------------------------------------
+     1         L1        2^15       0
+     2         L2        2^14      2^15 * L1
+     3         L3        2^13      2^15 * L1 + 2^14 * L2
+     4         L4        2^12      2^15 * L1 + 2^14 * L2 + 2^13 * L3
+
+こんな感じだ。これはいったい何だろうか？続く for 文を見てみよう。
+
+    for (i = 0; i < n; i++) {
+        j = len[i];
+        code[i] = start[j];
+        start[j] += weight[j];
+    }
+
+ここでの i は、0...n の範囲であることから平文の文字を示す。紛らわしい
+ので、i は、c に書き換え、j を i にしよう。(これで、i は前の for 文の 
+i と同じ意味になる)
+
+    int c;
+
+    for (c = 0; c < n; c++) {
+        i = len[c];
+        code[c] = start[i];
+        start[i] += weight[i];
+    }
+
+i = len[c] は文字 c のビット長で、ハフマン木の深さを示す。
+code[c] には、start[i] が設定されるが、一度 start[i] が参照されると
+start[i] は、weight[i] を足した値が次回使われる。例えば、ある文字
+a, b, c がそれぞれ以下のハフマン木で表現されたとする。
+
+       /\               a: 0
+      a /\              b: 10
+        b c             c: 11
+
+
+              i     len_cnt[i]   weight[i]   start[i]
+          --------------------------------------------
+              1         1         2^15        0
+              2         2         2^14       2^15
+
+  c  len[c]   i     len_cnt[i]   weight[i]   code[c]
+ ---------------------------------------------------
+  a     1     1         1            2^15       0
+  b     2     2         2            2^14      2^15
+  c     2     2         2            2^14      2^15 + 2^14
+
+こんな感じになる。別のハフマン木の場合も見てみよう。
+
+        /\                a: 00
+      /\  /\              b: 01
+     a  b c d             c: 10
+                          d: 11
+
+              i     len_cnt[i]   weight[i]   start[i]
+          --------------------------------------------
+              1         0         2^15        0
+              2         4         2^14        0
+              3         0         2^13       2^14 * 4
+
+  c  len[c]   i     len_cnt[i]   weight[i]   code[c]
+ ---------------------------------------------------
+  a     2     2         4            2^14      0
+  b     2     2         4            2^14      2^14
+  c     2     2         4            2^14      2^14 * 2
+  d     2     2         4            2^14      2^14 * 3
+
+これで、ピント来ると凄いのだが code[c] には文字 c に対応する符号化した
+ビット列が設定されるようになっていることに気づくだろうか？つまりは、
+
+  c  len[c]   i     len_cnt[i]   weight[i]   code[c]
+ -----------------------------------------------------------
+  a     2     2         4            2^14  00000000 00000000
+  b     2     2         4            2^14  01000000 00000000
+  c     2     2         4            2^14  10000000 00000000
+  d     2     2         4            2^14  11000000 00000000
+                                           ^^ <- ハフマン符号
+
+だ。以降、code[] (実際には codeparm) を利用することで表引きで文字 c に
+対応するハフマン符号を得ることができるようになっている(code[c]のうち上
+位 len[c] ビットだけを見る)。符号化の際に木を辿る必要はなく、高速な符号
+化が可能になる(と期待される。どの程度効果があるかはいずれ検証してみた
+い。そういえば、葉から根に向かって木を辿るための情報が必要なかったこと
+もこれでわかった)。
+
+結局 make_tree(nparm, freqparm, lenparm, codeparm) は、lenparm[c] と 
+codeparm[c] を作成する関数だったわけだ(ハフマン表とでも言うのだろう
+か？)。実は、このことは make_tree() を呼び出し、 codeparm を使用してい
+る箇所(huf.c)を見るまでまるでわからなかった。しかも、まだちゃんと理解
+したわけではない。
+
+ふと思ったのだが、上記の表作成は文字コード順に依存している(コードの若
+い方が左の子になる)が、木を作成する場合はそのようなことはなかったはず
+だ。ハフマン木を辿った場合と表を参照した場合とでは得られる符号語は異な
+るのではないだろうか？ということは圧縮文に埋め込まれるのは木ではなくこ
+の表の方だということも想像がつく。木の構造を表す left[]、right[] はグ
+ローバル変数だが、実際には make_tree() 内でしか使われないのかも知れな
+い(少なくとも符号化に関してはそのようだ。huf.c を眺めるとどうやら復号
+時は left[]、right[]は使われるらしい)。
+
+さらにふと思い付いた。謎の (C) のコードだが 深さ 17 以上の木が作成され
+た場合に木を再構築する処理だということがわかった。最初、len_cnt[] (あ
+る深さの葉の数) だけが、操作されていたからよくわからなかったのだ、
+
+    /* (C) */
+    /* adjust len */
+    if (cum) {
+        fprintf(stderr, "17");
+        len_cnt[16] -= cum; /* always len_cnt[16] > cum */
+        do {
+            for (i = 15; i > 0; i--) {
+                if (len_cnt[i]) {
+                    len_cnt[i]--;
+                    len_cnt[i + 1] += 2;
+                    break;
+                }
+            }
+        } while (--cum);
+    }
+
+深さ i の葉の数を 1 つ減らして、その下の葉の数を 2 足している。
+これが、cum の数だけ繰り返される。例えば、前にも出た
+
+                                                     :
+                   n /\       .. len_cnt[14] = 0000000000000001
+                    o /\       .. len_cnt[15] = 0000000000000001
+                     p /\       .. len_cnt[16] = 0000000000000011
+                      q  r                       ||||||||||||||||
+                                                 vvvvvvvvvvvvvvvv
+                                           cum = 0000000000000001
+
+の例では、最初に len_cnt[16] から cum {1} が引かれ、
+
+                                                     :
+                   n /\       .. len_cnt[14] = 0000000000000001
+                    o /\       .. len_cnt[15] = 0000000000000001
+                     p /       .. len_cnt[16] = 0000000000000010
+                      q
+
+続いて、深さ 15 より上の葉のある節から 1 つ子を取り、
+
+                                                     :
+                   n /\       .. len_cnt[14] = 0000000000000001
+                      /\       .. len_cnt[15] = 0000000000000000
+                     p /        .. len_cnt[16] = 0000000000000010
+                      q
+
+下の葉の数(この例では、len_cnt[16])を 2 足している。
+
+                /   \
+              n    /  \       .. len_cnt[14] = 0000000000000001
+                 /\    /\      .. len_cnt[15] = 0000000000000000
+                o  r  p /       .. len_cnt[16] = 0000000000000100
+                       q
+
+cum は、この例では 0 になるので、これで木の平滑化は終る。テキストだと
+ちょっと見にくいが、そういう処理ということで間違いないだろう。
+lenparm[] の値はこの後の (D) で、この木を元に計算されている。
+
+ところで、本当の所は以下のような文字の対応になる(表を作成するときに文
+字コード順になっているため)のだが、結果的に元の木から p を含む節を取り
+除き o の位置に挿入する処理になっている。なんだか面白い。
+
+                /   \
+              n    /  \       .. len_cnt[14] = 0000000000000001
+                 /\    /\      .. len_cnt[15] = 0000000000000000
+                o  p  q  r      .. len_cnt[16] = 0000000000000100
+
+文字から Huffman 符号が得られるようになったので、圧縮処理を行う道具は
+揃った。いよいよ Huffman 法による圧縮処理全般 (huf.c) を見ることにしよ
+う。
+
+まず huf.c で定義されているデータ構造から確認しよう。データ構造がわかっ
+てしまえばアルゴリズムの 90% はわかったも同然だ(誇張)。
+
+huf.c には以下の変数が定義されている。
+
+unsigned short  left[2 * NC - 1], right[2 * NC - 1];
+unsigned char   c_len[NC], pt_len[NPT];
+unsigned short  c_freq[2 * NC - 1], c_table[4096], c_code[NC], p_freq[2 * NP - 1],
+                pt_table[256], pt_code[NPT], t_freq[2 * NT - 1];
+
+static unsigned char *buf;
+static unsigned int bufsiz;
+static unsigned short blocksize;
+static unsigned short output_pos, output_mask;
+static          int   pbit;
+static          int   np;
+
+使用されている定数も確認する lha_macro.h だ。
+
+#define NP          (MAX_DICBIT + 1)
+#define NT          (USHRT_BIT + 3)
+#define PBIT        5       /* smallest integer such that (1 << PBIT) > * NP */
+#define TBIT        5       /* smallest integer such that (1 << TBIT) > * NT */
+#define NC          (UCHAR_MAX + MAXMATCH + 2 - THRESHOLD)
+/*      #if NT > NP #define NPT NT #else #define NPT NP #endif  */
+#define NPT         0x80
+#define CBIT                9   /* $\lfloor \log_2 NC \rfloor + 1$ */
+
+たくさんある。たくさんありすぎてくじけそうだが(事実、くじけた)、現時点
+でわかる変数もある。left[] や right[] は Huffman 木を構築するのに使用
+した変数だった。そこから NC は文字種の最大数であることがわかる。NC に 
+MAXMATCH{256} 等の値が使用されているのは謎だが、現時点では無視しておこ
+う。
+
+c_freq[] や c_len[], p_freq[], pt_len[] も make_tree() で出て来た変数
+名に似ている。おそらく make_tree() に渡す変数だろう。確認してみたとこ
+ろ huf.c から make_tree() の呼び出しを行っている部分を抜き出すと、
+
+    root = make_tree(NC, c_freq, c_len, c_code);
+    root = make_tree(NT, t_freq, pt_len, pt_code);
+    root = make_tree(np, p_freq, pt_len, pt_code);
+
+の 3 箇所が出て来た。つまり、
+
+   文字種の数  文字の出現回数   符号化した文字  文字に対応する
+                                の bit 長       Huffman 符号表
+   -----------------------------------------------------------
+     NC         c_freq          c_len           c_code
+     NT         t_freq          pt_len          pt_code
+     np         p_freq          pt_len          pt_code
+
+という関係のようだ。どうやら c_code、pt_code という 2 種類の
+Huffman 符号表を使用するらしい。
+
+# あとでわかることだが実際は 3 種類の Huffman 符号表を作っており
+# pt_code は変数が使い回しされている。変数の使用領域を減らし
+# たかったのだろう。
+
+その他の変数に関しても予想を立てたい所だが、もうくじけたので、処理内容
+から攻めることにした。
+
+slide 辞書法の解読で Huffman 法に関連した処理の呼び出しがいくつかあっ
+た。
+
+    /* initialize */
+    alloc_buf()
+
+    /* encoder */
+    encode_set.encode_start()
+    encode_set.output(c, off)
+    encode_set.encode_end()
+
+    /* decoder */
+    decode_set.decode_start()
+    decode_set.decode_c()
+    decode_set.decode_p()
+
+以上だ。lh4, 5, 6, 7 では、上記のそれぞれは、huf.c の以下の関数の呼び
+出しに対応している。これは、slide.c の冒頭部分で定義されている。
+
+    /* encoder */
+    encode_start() -> encode_start_st1()
+    output()       -> output_st1()
+    encode_end()   -> encode_end_st1()
+
+    /* decoder */
+    decode_start() -> decode_start_st1()
+    decode_c()     -> decode_c_st1()
+    decode_p()     -> decode_p_st1()
+
+このうちの圧縮処理にあたる部分 encode_start_st1(), output_st1(),
+encode_end_st1() を見ていこう。まずは、初期化処理である 
+encode_start_st1() から、
+
+void
+encode_start_st1( /* void */ )
+{
+    int             i;
+
+    if (dicbit <= 13) {
+        pbit = 4;   /* lh4,5 etc. */
+        np = 14;
+    } else {
+        pbit = 5;   /* lh6,7 */
+        if (dicbit == 16)
+            np = 17;
+        else
+            np = 16;
+    }
+
+    for (i = 0; i < NC; i++)
+        c_freq[i] = 0;
+    for (i = 0; i < np; i++)
+        p_freq[i] = 0;
+    output_pos = output_mask = 0;
+    init_putbits();
+    buf[0] = 0;
+}
+
+dicbit (これは辞書の bit サイズだった)によって、np, pbit の値が変わる。
+dicbit の違いというのは LHa の encoding メソッドの違いだ。それぞれ以下
+の対応になる。
+
+    method  dicbit  np  pbit
+   --------------------------
+    -lh4-   12      14  4
+    -lh5-   13      14  4
+    -lh6-   15      16  5
+    -lh7-   16      17  5
+
+np というのは、先程 make_tree() を呼び出している箇所の洗い出しで見かけ
+た変数だった。まだ、この関連はよくわからない。
+
+処理の後半では、文字の出現頻度を表す c_freq[]、p_freq[] の初期化を
+行っている。さらに
+
+    output_pos
+    output_mask
+    buf[]
+
+という初出の変数も 0 に初期化している。(buf は、buf[0] のみ初期化して
+いる) init_putbits() の呼び出しは bit 出力ルーチンの初期化処理だった。
+以降、putbits(), putcode() を使用できる。
+
+次に output_st1(c, p) を見る。slide.c でこの関数は以下のように使用され
+ていた。
+
+        output_st1(c, 0)        文字 c を出力
+        output_st1(len, off)    <len, off> のペアを出力
+
+このことを踏まえた上で、処理内容を見てみよう。
+
+void
+output_st1(c, p)
+    unsigned short  c;
+    unsigned short  p;
+{
+    static unsigned short cpos;
+
+    /* (A) */
+    output_mask >>= 1;
+    if (output_mask == 0) {
+        output_mask = 1 << (CHAR_BIT - 1);
+        if (output_pos >= bufsiz - 3 * CHAR_BIT) {
+            send_block();
+            if (unpackable)
+                return;
+            output_pos = 0;
+        }
+        cpos = output_pos++;
+        buf[cpos] = 0;
+    }
+    /* (B) */
+    buf[output_pos++] = (unsigned char) c;
+    c_freq[c]++;
+    /* (C) */
+    if (c >= (1 << CHAR_BIT)) {
+        buf[cpos] |= output_mask;
+        buf[output_pos++] = (unsigned char) (p >> CHAR_BIT);
+        buf[output_pos++] = (unsigned char) p;
+        c = 0;
+        while (p) {
+            p >>= 1;
+            c++;
+        }
+        p_freq[c]++;
+    }
+}
+
+(A) は、output_mask の値に応じて処理を行うようだ。初期化で output_mask 
+は 0 だから (A) の処理は最初から実行されるが、ひとまず無視しよう。
+
+(B) は、buf に引数で渡された文字 c を格納し、c_freq[c] の値(文字の出現
+頻度)を足している。どうやら基本は渡された文字 c を延々と buf に格納し、
+後で圧縮を行う(おそらく (A) だろう)ようだ。
+
+この buf のサイズはと言うと、これは alloc_buf() で割り当てられていた。
+
+unsigned char  *
+alloc_buf( /* void */ )
+{
+    bufsiz = 16 * 1024 *2;  /* 65408U; */ /* t.okamoto */
+    while ((buf = (unsigned char *) malloc(bufsiz)) == NULL) {
+        bufsiz = (bufsiz / 10) * 9;
+        if (bufsiz < 4 * 1024)
+            break;
+    }
+    return buf;
+}
+
+bufsiz が buf のサイズらしい。これはできるだけ大きく取るようにしている
+が、大きく取れなければそれはそれで良いようだ。
+
+さらに、(C) の処理を行うかどうかは、c >= (1 << CHAR_BIT) という条件で
+判断されている。この条件が真となる場合は何かと言うと c が「長さ」を表
+す場合だ。このとき引数 p で「位置」が渡されているのでこれも buf にセッ
+トしている。その具体的内容はというと、何やら cpos というこの関数内で 
+static な変数が使用されている。よくわからないが文字 c や <len,off> の
+ペアは、buf 上で以下のように表されるらしい。
+
+----------------------------------------------------------------------------
+
+output_st1(c1, 0)
+output_st1(c2, 0)
+output_st1(len, off)
+
+と呼び出した場合の buf の状態
+
+    +-----+-----+-----+-----+-----+
+buf | c1  | c2  | len |    off    |
+    +-----+-----+-----+-----+-----+
+
+----------------------------------------------------------------------------
+
+(C) の処理の最後の部分
+
+        c = 0;
+        while (p) {
+            p >>= 1;
+            c++;
+        }
+        p_freq[c]++;
+
+は、出現頻度 p_freq[] を求める処理だが、p_freq は、off 値の出現頻度を
+表しているらしい。ここでの c は、p (off) の bit 長になっている。off の
+値は大きい(辞書サイズだから最大(lh7)で、64KB)ので、代わりに bit 長を利
+用しているといったところか。そういえば、np という変数があり、
+make_tree() の第一引数に渡されることから、これは、p_freq[] の要素数を
+表す。p_freq[] の要素数とは、<off> の bit 長の最大値+1なので、lh7 で、
+64KB。つまり 16 bit + 1 が np になる。
+
+ついでに言うと、「長さ」はそのまま c_freq[] で頻度が計上されていた。同
+じく make_tree() の第一引数に渡される NC の値が
+
+#define NC          (UCHAR_MAX + MAXMATCH + 2 - THRESHOLD)
+
+なのは、そういうことだ(長さを考えなければ文字の最大値{255}+1となるとこ
+ろだが、長さの最大値が、256 + MAXMATCH - THRESHOLD だから上の式になっ
+ているのだろうと思う。ちょっとわかりにくいが)
+
+ここまでで、圧縮を行う処理は現われなかった。やはり (A) の部分が圧縮処
+理だ。
+
+    /* (A) */
+    output_mask >>= 1;
+    if (output_mask == 0) {
+        output_mask = 1 << (CHAR_BIT - 1);
+        if (output_pos >= bufsiz - 3 * CHAR_BIT) {
+            send_block();
+            if (unpackable)
+                return;
+            output_pos = 0;
+        }
+        cpos = output_pos++;
+        buf[cpos] = 0;
+    }
+
+最初、output_mask は、0 なので if 条件を満たす。そして、output_mask は、
+(1 << (CHAR_BIT - 1)) つまり、128 になる。(A) の冒頭で、>>= 1 している
+ので、output_mask は、128, 64, 32, ..., 1, 128 という値を取るらしい。そ
+して、本当の初期値は 128 だ。
+
+次の条件
+
+  output_pos >= bufsiz - 3 * CHAR_BIT
+
+というのは、buf が bufsiz - 24 よりも大きくなったときの値だ。ひとまず
+無視しよう。そして、cpos = output_pos++ として、buf[cpos] = 0 にセット
+されている。どうやら、先にこちらを見るべきだったようだ。cpos の値
+と output_pos++ が (A) で行われていることを踏まえてもう一度 (B)、(C)
+の処理を見ると、buf は以下のように使用されているらしい。
+
+----------------------------------------------------------------------------
+
+output_st1(c1, 0)
+output_st1(c2, 0)
+output_st1(len, off)
+
+と呼び出した場合の buf の状態
+
+
+    +-----+-----+-----+-----+-----+-----+--
+buf |  32 | c1  | c2  | len |    off    |  ...
+    +-----+-----+-----+-----+-----+-----+--
+   cpos                                output_pos
+
+----------------------------------------------------------------------------
+
+<len, off> のペアを出力するとき buf[cpos] には以下のような値が設定され
+ていたことも図に書いてある。
+
+        buf[cpos] |= output_mask;
+
+もう少し注意深くこのあたりを考えよう。output_mask は、この関数が呼ばれ
+るたびに 128, 64, 32, ..., 1, 128, 64, ... という値になる。そして、buf 
+は、呼ばれるたびに c (1バイト)、あるいは <len, off> (3バイト)の値が設
+定されるが、output_mask が 128 になったときは、余分に 1 バイト空きがで
+きる(これは、buf[cpos]で示される)。この空きには <len,off> が設定される
+たびにその時点の output_mask 値が設定されるようだ。(A) が呼ばれるとき
+と言うのは、一番最初の output_mask = 0 の場合を除けば、
+
+----------------------------------------------------------------------------
+
+output_mask  128  64   32             16   8              4    2    1
+        +----+----+----+----+----+----+----+----+----+----+----+----+----+
+buf     | 40 | c1 | c2 |len |   off   | c4 |len |   off   | c6 | c7 | c8 |
+        +----+----+----+----+----+----+----+----+----+----+----+----+----+
+        cpos                                                            /
+                                                                       /
+                                                               output_pos
+   buf[cpos] = 32 + 8
+
+----------------------------------------------------------------------------
+
+このような状態になったときということだ。さらに、buf[cpos] には、
+<len,off> が格納されている位置を表している。この状態を 1 セグメントと呼
+ぶことにしよう。そしてこのセグメント単位に情報が buf に格納され、buf が
+いっぱいになったらこのセグメントの集まりを 1 ブロックとして (A) の処理
+の無視したif 文の中身で
+
+        if (output_pos >= bufsiz - 3 * CHAR_BIT) {
+            send_block();
+            if (unpackable)
+                return;
+            output_pos = 0;
+        }
+
+のように send_block() が呼ばれるようになっているようだ。この if の条件
+で、3 * CHAR_BIT というのは <len, off> の格納バイト数を示している。
+(と思ったが、3 * CHAR_BIT ではビット数だ。一方、bufsiz はバイト数だ。
+計算に使用している単位が違う。何やらバグっぽい雰囲気があるが、バグだと
+してもバッファをちょっとだけ無駄にしているだけなので大したことはないの
+だろう)
+
+# どうやらバグではないらしい。3 * CHAR_BIT というのは、1 セグメントが
+# CHAR_BIT のスロット(8 つのスロット)を持ち、1 セグメント内のスロットが
+# すべて <len,off> (3 bytes)の場合、最大 3 bytes * 8 となることを示して
+# いるようだ。
+# CHAR_BIT は、buf[cpos] のビット数を表している。
+#
+# 実際のところ 1 セグメントは、buf[cpos] の領域 1 byte が先頭に必要なの
+# で最大サイズは
+#       3 * CHAR_BIT + 1
+# となる。そういう意味では、
+#       if (buf の残りサイズ < 最大サイズ) {
+# という形式。つまり、
+#       if (bufsiz - output_pos < 3 * CHAR_BIT + 1) {
+# の方がわかりやすいように思う。
+
+output_pos = 0 としていることからこの時点の buf の中身(セグメントの集ま
+り=1 ブロック)がすべて send_block() で圧縮されファイルに出力されるだろ
+うことが想像できる。
+
+この 1 ブロックに満たない状態でファイルの終りが来た場合、後処理 
+encode_end_st1() で send_block() が呼ばれるであろうことも想像できる。
+
+encode_end_st1( /* void */ )
+{
+    if (!unpackable) {
+        send_block();
+        putbits(CHAR_BIT - 1, 0);   /* flush remaining bits */
+    }
+}
+
+思った通りである。putbits(7, 0) というは、bitbuf に残った bit を吐き出す
+ためであることは、bit 入出力ルーチンの解読で確認済みだ。
+
+そういうわけで、send_block() が圧縮のメインルーチンである。
+send_block() の入力とは先に示した図の状態の buf だ。huf.c:send_block() 
+を見てみよう。
+
+static void
+send_block( /* void */ )
+{
+    unsigned char   flags;
+    unsigned short  i, k, root, pos, size;
+
+    /* (A) */
+    root = make_tree(NC, c_freq, c_len, c_code);
+    size = c_freq[root];
+    putbits(16, size);
+    /* (B) */
+    if (root >= NC) {
+        count_t_freq();
+        root = make_tree(NT, t_freq, pt_len, pt_code);
+        if (root >= NT) {
+            write_pt_len(NT, TBIT, 3);
+        } else {
+            putbits(TBIT, 0);
+            putbits(TBIT, root);
+        }
+        write_c_len();
+    } else {
+        putbits(TBIT, 0);
+        putbits(TBIT, 0);
+        putbits(CBIT, 0);
+        putbits(CBIT, root);
+    }
+    /* (C) */
+    root = make_tree(np, p_freq, pt_len, pt_code);
+    if (root >= np) {
+        write_pt_len(np, pbit, -1);
+    }
+    else {
+        putbits(pbit, 0);
+        putbits(pbit, root);
+    }
+    /* (D) */
+    pos = 0;
+    for (i = 0; i < size; i++) {
+        if (i % CHAR_BIT == 0)
+            flags = buf[pos++];
+        else
+            flags <<= 1;
+        if (flags & (1 << (CHAR_BIT - 1))) {
+            encode_c(buf[pos++] + (1 << CHAR_BIT));
+            k = buf[pos++] << CHAR_BIT;
+            k += buf[pos++];
+            encode_p(k);
+        } else
+            encode_c(buf[pos++]);
+        if (unpackable)
+            return;
+    }
+    /* (E) */
+    for (i = 0; i < NC; i++)
+        c_freq[i] = 0;
+    for (i = 0; i < np; i++)
+        p_freq[i] = 0;
+}
+
+なかなか大きな関数であるが、それほど難しいことはない。まず、(A)
+
+    /* (A) */
+    root = make_tree(NC, c_freq, c_len, c_code);
+    size = c_freq[root];
+    putbits(16, size);
+
+make_tree() で Huffman 表 c_len[], c_code[] を構築する。戻り値の root 
+は、Huffman 木の根を示し、c_freq[root] は、文字の出現回数の総和である
+から、size は、平文の総バイト数だ(size に <off> の分のサイズは含まれな
+い。c_freq[] が、<off> の出現頻度を数えなかったから)。ファイルには、こ
+の size がまず書き出されている(そういえば、この bit 入出力ルーチンを使
+用するとバイトオーダーに関して考慮する必要がなくなる)。
+
+----------------------------------------------------------------------------
+
+      16bit
+   |---------|
+   +----+----+
+   |  size   |
+   +----+----+
+
+----------------------------------------------------------------------------
+
+続いて、(B)
+
+    if (root >= NC) {
+        count_t_freq();
+        root = make_tree(NT, t_freq, pt_len, pt_code);
+        if (root >= NT) {
+            write_pt_len(NT, TBIT, 3);
+        } else {
+            putbits(TBIT, 0);
+            putbits(TBIT, root);
+        }
+        write_c_len();
+    } else {
+        putbits(TBIT, 0);
+        putbits(TBIT, 0);
+        putbits(CBIT, 0);
+        putbits(CBIT, root);
+    }
+
+root が NC よりも大きい場合を判断しているが、ハフマン木の根は必ず NC よ
+りも大きい(make_tree() の avail の初期値を確認しよう)。では、この
+条件を満たさない場合と言うのは何かと言うと、同じく make_tree() を確認すると、
+
+    if (heapsize < 2) {
+        codeparm[heap[1]] = 0;
+        return heap[1];
+    }
+
+という例外条件があった。これは、圧縮する文字がない、あるいは 1 種類しか
+ない場合の処理だ。圧縮する文字がない場合に send_block() が呼ばれること
+はないだろうから、(B) の処理の else は 1 ブロック中に圧縮する文字が 1 
+種類しかない場合の処理である(この 1 種類の文字とは、make_tree() の戻り
+値 root だ)。このとき以下のような出力になる。(TBIT{5}, CBIT{9} である)
+
+----------------------------------------------------------------------------
+      TBIT    CBIT
+   TBIT   CBIT
+   |--|--|----|----|               TBIT: 5
+   +--+--+----+----+               CBIT: 9
+   | 0| 0|   0|root|
+   +--+--+----+----+
+
+----------------------------------------------------------------------------
+
+これが、1 ブロックに 1 種類しか文字がない場合の出力だ(off の情報はまだ
+含まない)。(B)の if が真のときがどうなるかは複雑そうなので後で見ること
+にしよう。
+
+続いて (C)
+
+    root = make_tree(np, p_freq, pt_len, pt_code);
+    if (root >= np) {
+        write_pt_len(np, pbit, -1);
+    }
+    else {
+        putbits(pbit, 0);
+        putbits(pbit, root);
+    }
+
+p_freq[] を見ていることから今度は <off> の情報の Huffman 木を構築して
+いることがわかる。先程と同様に、<off> の値がすべて同じ場合は、else の
+条件になり、以下の出力が行われる。(pbit の値は、-lh7- の場合で、5 だ)
+
+----------------------------------------------------------------------------
+
+       pbit     pbit                method  pbit
+   |---------|---------|            ----------
+   +----+----+---------+            -lh4-   4
+   |     0   |  root   |            -lh5-   4
+   +----+----+---------+            -lh6-   5
+                                    -lh7-   5
+
+----------------------------------------------------------------------------
+
+ここまでに出力した情報が何を示すかわかるだろうか？Huffman 法の符号化処
+理は文字を bit 列に変換する。これを復号する場合は bit 列に対応する文字
+を知る必要がある。すなわち Huffman 木である(実際には Huffman 表)。図示
+したのは、Huffman 木を構築する必要がない(構築できない)場合の情報になる
+が、現在解読を飛ばしている処理は Huffman 表をファイルに出力している箇
+所であることは容易に想像がつく。ということは残りの (D) が本当の圧縮文
+を出力する箇所だ。
+
+    /* (D) */
+    pos = 0;
+    for (i = 0; i < size; i++) {
+        if (i % CHAR_BIT == 0)
+            flags = buf[pos++];
+        else
+            flags <<= 1;
+        if (flags & (1 << (CHAR_BIT - 1))) {
+            encode_c(buf[pos++] + (1 << CHAR_BIT));
+            k = buf[pos++] << CHAR_BIT;
+            k += buf[pos++];
+            encode_p(k);
+        } else
+            encode_c(buf[pos++]);
+        if (unpackable)
+            return;
+    }
+
+size 数分ループしている。size は、<off> を除いた buf の文字数を示して
+いると前に書いたが、どうやら <len, off> を 1 文字と数えたときの buf の
+文字数を示していると考えた方が良さそうだ。
+
+最初の if で、
+
+        if (i % CHAR_BIT == 0)
+            flags = buf[pos++];
+        else
+            flags <<= 1;
+
+これが真になる条件は buf[pos] が buf[cpos] である場合だ(output_mask が 
+128, 64, ..., 1 と 8 つの値を巡回していたことを思い出そう)。
+flags は、<len, off> の buf 上の位置を示す bit マスクになる。
+
+        if (flags & (1 << (CHAR_BIT - 1))) {
+            encode_c(buf[pos++] + (1 << CHAR_BIT));
+            k = buf[pos++] << CHAR_BIT;
+            k += buf[pos++];
+            encode_p(k);
+        } else
+            encode_c(buf[pos++]);
+
+flags の 7 ビット目(128)が立っているとき buf[pos] は、<len, off> を指し、
+
+  encode_c(len + 256)
+  encode_p(off)
+
+で、圧縮を行うようだ。len に 256 を足しているのは、buf[] に len を格納
+するとき(output_st1() の (B) の処理)に
+
+    buf[output_pos++] = (unsigned char) c;
+
+のように最上位 bit を捨てていたからだ。len は常に 256 以上なので、256 
+を足すことで元の len の値を圧縮ルーチンに渡している。
+
+通常の文字は
+
+  encode_c(buf[pos])
+
+で圧縮されている。encode_c() の処理内容は簡単なので見てみよう。
+
+static void
+encode_c(c)
+    short           c;
+{
+    putcode(c_len[c], c_code[c]);
+}
+
+c_len[], c_code[] が文字 c に対応する Huffman 符号の bit 長と符号を示
+しているので、それをそのまま出力している。簡単だ。
+
+encode_p() はもう少し複雑だ。
+
+static void
+encode_p(p)
+    unsigned short  p;
+{
+    unsigned short  c, q;
+
+    c = 0;
+    q = p;
+    while (q) {
+        q >>= 1;
+        c++;
+    }
+    putcode(pt_len[c], pt_code[c]);
+    if (c > 1)
+        putbits(c - 1, p);
+}
+
+最初の while 文で、<off> の bit 長を求め、その bit 長の情報を
+Huffman 符号化している。その後、putbits() で、必要 bit 数だけ
+出力する。つまり、<off> は以下のように符号化される。
+
+----------------------------------------------------------------------------
+off = 64 の圧縮
+
+     |---- 16 bit -------|
+     +----+----+----+----+
+off  |0000 0000 0100 0000|
+     +----+----+----+----+
+                 |-7 bit-|
+
+この圧縮文は以下(長さが 7 bit であるという情報(Huffman符号化)と値のペア)
+
+                       |-6 bit-|
+     +-----------------+-------+
+     | 7 のHuffman符号 |00 0000|
+     +-----------------+-------+
+
+----------------------------------------------------------------------------
+
+ここで、値を 6 bit しか出力しない(putbits() で c-1 を渡している)のは、
+7 bit 目が 1 であることが自明だからである。最初にビット長を出力している
+ので、値の情報は1 bit 削減できるわけだ。したがって、off=1 のときは bit
+長が 1 という情報しか書き出さない。
+
+最後の (E) は頻度表をクリアしているだけだ。
+
+    /* (E) */
+    for (i = 0; i < NC; i++)
+        c_freq[i] = 0;
+    for (i = 0; i < np; i++)
+        p_freq[i] = 0;
+
+ここで、頻度表をクリアしているということは文字や位置の出現回数は 1 ブロック
+単位でしか計上しないことを表す。
+
+# 一方、c_freq や p_freq は unsigned short であるから(16 bit だとし
+# て)65535 までしか数えられない。さらに、{c,p}_freq には Huffman 木の構
+# 築の過程で出現回数の総和がセットされる場合があることから 1 ブロックに
+# は 65535 文字 + 65535 個の位置までしか格納できない。
+# いや、位置は必ず長さとセットであることから。位置の出現回数は文字の出
+# 現回数(これは長さの出現回数を含む)に含まれるため 65535 スロットまでし
+# か buf を持てないことになる。これは blocksize (16 bit)とも一致する。
+#
+# buf の領域確保は以下のようになっていた。
+#
+#    unsigned char  *
+#    alloc_buf( /* void */ )
+#    {
+#       bufsiz = 16 * 1024 *2;  /* 65408U; */ /* t.okamoto */
+#       while ((buf = (unsigned char *) malloc(bufsiz)) == NULL) {
+#           bufsiz = (bufsiz / 10) * 9;
+#           if (bufsiz < 4 * 1024)
+#               break;
+#       }
+#       return buf;
+#    }
+#
+# これから、bufsiz は、16 * 1024 *2 = 2^4 * 2^10 * 2 = 2^15 である。
+# 1 セグメントの最小サイズがバイト数で(1*CHAR_BIT+1)であるから
+# この領域に格納できる最大セグメント数は、
+#   2^15 / (1*CHAR_BIT+1)
+# であり、1 セグメントは 8 スロットあるから、最大スロット数は
+#     8 * 2^15 / (1*CHAR_BIT+1)
+#   = 2^18 / 9
+#   = 29127.1111111111
+# となる。これは、頻度表の上限(スロット数の上限)
+#   65535=2^16-1
+# よりも小さいので問題はないことになる。
+#
+# なお、1 ブロックのサイズはこのバッファサイズにより決まるわけだが 1 ブ
+# ロックのサイズが大きければ大きいほどよいというわけではない。むしろ、
+# 文字の出現確率の変動に追随するためには小さい方がよいのだがそうすると
+# Huffman 木の格納回数が増えるので簡単には最適値は決まらない。
+
+以上で、圧縮処理全体の概要がわかった。後は無視していた Huffman 表を出
+力する箇所だけだ。
+
+    /* (B) */
+    if (root >= NC) {
+        count_t_freq();
+        root = make_tree(NT, t_freq, pt_len, pt_code);
+        if (root >= NT) {
+            write_pt_len(NT, TBIT, 3);
+        } else {
+            putbits(TBIT, 0);
+            putbits(TBIT, root);
+        }
+        write_c_len();
+
+ここでは、c_len[], c_code[] という Huffman 表を出力するだけのはずだが、
+さらに Huffman 表 pt_len[], pt_code[] の構築を行っている。これは、
+<off> の bit 長の Huffman 符号表でもあった変数だが、単に変数を使い回し
+ているだけだ。ここでの pt_len[], pt_code[] が何の符号表かは、
+count_t_freq() を見る必要がある。
+
+static void
+count_t_freq(/*void*/)
+{
+    short           i, k, n, count;
+
+    for (i = 0; i < NT; i++)
+        t_freq[i] = 0;
+    n = NC;
+    while (n > 0 && c_len[n - 1] == 0)
+        n--;
+    i = 0;
+    while (i < n) {
+        k = c_len[i++];
+        if (k == 0) {
+            count = 1;
+            while (i < n && c_len[i] == 0) {
+                i++;
+                count++;
+            }
+            if (count <= 2)
+                t_freq[0] += count;
+            else if (count <= 18)
+                t_freq[1]++;
+            else if (count == 19) {
+                t_freq[0]++;
+                t_freq[1]++;
+            }
+            else
+                t_freq[2]++;
+        } else
+            t_freq[k + 2]++;
+    }
+}
+
+最初に頻度表 t_freq[] を初期化する。続いて、
+
+    n = NC;
+    while (n > 0 && c_len[n - 1] == 0)
+        n--;
+
+で、c_len[n] != 0 である最大の n を求めている。
+
+    i = 0;
+    while (i < n) {
+        k = c_len[i++];
+        if (k == 0) {
+            count = 1;
+            while (i < n && c_len[i] == 0) {
+                i++;
+                count++;
+            }
+            if (count <= 2)
+                t_freq[0] += count;
+            else if (count <= 18)
+                t_freq[1]++;
+            else if (count == 19) {
+                t_freq[0]++;
+                t_freq[1]++;
+            }
+            else
+                t_freq[2]++;
+        } else
+            t_freq[k + 2]++;
+    }
+
+c_len[i] は、文字 i の Huffman 符号での bit 長であった。この
+c_len[i] の値を以下の場合分けで t_freq[] に頻度計算している。
+count は、c_len[i] が連続で何回 0 であるかの数だ。
+
+  c_len[i]    count     t_freq[]
+  -------------------------------------------
+     0        1 .. 2    t_freq[0] += count
+     0        3 ..18    t_freq[1]++
+     0        19        t_freq[0]++, t_freq[1]++
+     0        20以上    t_freq[2]++
+   0以外                t_freq[c_len[i]+2]++;
+
+これがどういう理屈であるかはよくわからないが、とにかく頻度計算を行う場
+合に t_freq[0], t_freq[1], t_freq[2] を特別扱いしている。そして、頻度
+計算の対象が c_len[] であることから (B) の処理は、c_len[] に関して 
+Huffman 符号化を行う処理のようだ。
+
+そうして、make_tree() で、t_freq[] に関して Huffman 符号表を作成し、
+write_pt_len() で、この符号表(文字の Huffman 符号のビット長 c_len の 
+Huffman 符号のビット長) pt_len[] を出力する。
+
+static void
+write_pt_len(n, nbit, i_special)
+    short           n;
+    short           nbit;
+    short           i_special;
+{
+    short           i, k;
+
+    while (n > 0 && pt_len[n - 1] == 0)
+        n--;
+    putbits(nbit, n);
+    i = 0;
+    while (i < n) {
+        k = pt_len[i++];
+        if (k <= 6)
+            putbits(3, k);
+        else
+            putbits(k - 3, USHRT_MAX << 1);
+        if (i == i_special) {
+            while (i < 6 && pt_len[i] == 0)
+                i++;
+            putbits(2, i - 3);
+        }
+    }
+}
+
+最初に pt_len[] の要素数を nbit 出力し、続けて符号 bit 長 pt_len[] の
+要素を出力している。nbit は、n を格納するのに必要な bit 数を表している
+ようだ。ここでは、n (NT{19}) を出力するのに TBIT{5} bit 必要であるとい
+うことだ。
+
+pt_len[] を出力するときは、その値が 6 より大きいかどうかで形式を変えて
+出力している。6 以下であればそのまま 3 bit で出力し、7 bit 以上であれ
+ば、bit 数で表現するらしい。例えば pt_len[i] == 7 なら、1110 となる。
+最初の 3 bit は必ず 1 になり、最初の形式と区別がつくようになっている。
+
+さらに、i_special 番目の pt_len[i] を出力した後は、i_special ... 6 の範
+囲で pt_len[i] == 0 が続くことを 2 bit で、表現している。i_special は
+write_pt_len() の 3 番目の引数で、今回の場合は 3 だ。例えば
+pt_len[3..5] がすべて 0 なら pt_len[3..5] を出力せずに、i - 3 (= 3) を
+2 bit 出力する。つまり、11 が出力される。このようなことをしている意味は
+これまたよくわからない。ちょっと複雑なので図示してみた。
+
+----------------------------------------------------------------------------
+< pt_len[] の出力フォーマット >
+
+             0       TBIT{5}
+             +-------+-----------+-----------+--   --+-----------+
+             |   n   | pt_len[0] | pt_len[1] | ...    pt_len[n-1]|
+             +-------+-----------+-----------+--   --+-----------+
+
+pt_len[i] <= 6 の場合
+
+              0     3bit
+              +-----+
+    pt_len[i] | | | |
+              +-----+
+
+pt_len[i] >= 7 の場合
+
+              0             pt_len[i] - 3
+              +----------------+
+    pt_len[i] |1 1 1 1 ... 1 0 |
+              +----------------+
+
+pt_len[i_special-1] の直後は 2 bit の情報が付加される。この値を x とする
+と、pt_len[i_special .. x + 2] の範囲で 0 が続くことを意味する。x が 0
+なら pt_len[i_special] は 0 ではない。
+
+----------------------------------------------------------------------------
+
+最後に、write_c_len() で、Huffman 符号のビット長 c_len[] (の Huffman 符
+号表 pt_code[]) を出力する。
+
+static void
+write_c_len(/*void*/)
+{
+    short           i, k, n, count;
+
+    n = NC;
+    while (n > 0 && c_len[n - 1] == 0)
+        n--;
+    putbits(CBIT, n);
+    i = 0;
+    while (i < n) {
+        k = c_len[i++];
+        if (k == 0) {
+            count = 1;
+            while (i < n && c_len[i] == 0) {
+                i++;
+                count++;
+            }
+            if (count <= 2) {
+                for (k = 0; k < count; k++)
+                    putcode(pt_len[0], pt_code[0]);
+            }
+            else if (count <= 18) {
+                putcode(pt_len[1], pt_code[1]);
+                putbits(4, count - 3);
+            }
+            else if (count == 19) {
+                putcode(pt_len[0], pt_code[0]);
+                putcode(pt_len[1], pt_code[1]);
+                putbits(4, 15);
+            }
+            else {
+                putcode(pt_len[2], pt_code[2]);
+                putbits(CBIT, count - 20);
+            }
+        }
+        else
+            putcode(pt_len[k + 2], pt_code[k + 2]);
+    }
+}
+
+前に、頻度を数えたときと同様の条件で出力形式が変わっている。処理内容は
+簡単なので、以下の図を示すだけにする(理屈はよくわからない)。
+
+----------------------------------------------------------------------------
+< c_len[] の出力フォーマット >
+
+             0       CBIT{9}
+             +-------+-----------+-----------+--   --+-----------+
+             |   n   |  c_len[0] |  c_len[1] | ...     c_len[n-1]|
+             +-------+-----------+-----------+--   --+-----------+
+
+c_len[i] == 0 の場合
+
+ 0 が続く数を count とすると、
+
+ count == 1..2 の場合
+
+                pt_len[0]
+              <---------->
+             +------------+
+             | pt_code[0] |
+             +------------+
+
+ count == 3..18 の場合
+
+               pt_len[1]    4 bit
+              <----------> <------>
+             +------------+-------+
+             | pt_code[1] |count-3|
+             +------------+-------+
+
+ count == 19 の場合
+
+                pt_len[0]   pt_len[1]    4 bit
+              <----------> <----------> <------>
+             +------------+------------+-------+
+             | pt_code[0] | pt_code[1] |count-3|
+             +------------+------------+-------+
+
+  count >= 20 の場合
+
+                pt_len[2]    CBIT{9}
+              <----------> <------>
+             +------------+--------+
+             | pt_code[2] |count-20|
+             +------------+--------+
+
+c_len[i] != 0 の場合
+
+              pt_len[c_len[i]+2]
+             +-------------------+
+             |pt_code[c_len[i]+2]|
+             +-------------------+
+
+----------------------------------------------------------------------------
+
+こうして、文字の Huffman 符号表は、pt_len[] と pt_code[](pt_code[] は
+つまり c_len[] の Huffman 符号)を出力することで表現される。c_code[] が
+出力されてないと思うかもしれないが、おそらく、decode 処理が c_len[] の値
+から計算して求めているのではないかと思われる。これは decode 処理の解読
+で明らかになるだろう。
+
+# 少し変なことを書いている。pt_code[] の出力は、c_len[] の Huffman 符号
+# を出力しているのであり、Huffman 木の情報として出力しているわけではな
+# い。つまり、c_code[] が出力されていないのと同様に pt_code[] も出力は
+# していない。
+
+この後、send_block() は、(C) で、<off> の Huffman 符号表を出力するのだ
+が、
+
+        write_pt_len(np, pbit, -1);
+
+これは、先の pt_len[] の出力フォーマットと同じなので詳細ははしょろう。
+ただし、今度の pt_len[] の出力では write_pt_len() の第三引数 i_special 
+が -1 で指定されていて、i_special 番目の pt_len[i_special..5] に関して
+特別扱いがなくなっているところが異なる。
+
+np や pbit の意味もこの時点でわかるので一応説明しておく。np, pbit そし
+て、LHA の圧縮 method との関係は以下の表の通りなのだが、np は、<off> の
+最大 bit 長 + 1 だ。<off> の最大 bit 長はすなわち dicbit なので、np は、
+dicbit + 1 である。-lh4- のときに dicbit + 2 なのが不思議だが、これは歴
+史的な理由だろうと思われる。pbit は、値 np を出力するのに必要な bit 数
+なので表の通りになる。
+
+    method  dicbit  np  pbit
+   --------------------------
+    -lh4-   12      14  4
+    -lh5-   13      14  4
+    -lh6-   15      16  5
+    -lh7-   16      17  5
+
+まとめると LHA における圧縮ファイルの構造は以下の連続であると言えるよ
+うだ。
+
+----------------------------------------------------------------------------
+< LHA ファイルの構造(1 ブロック分) >
+
+    +-----------+
+    | blocksize |
+    +-----------+
+       16bit
+
+    +-----+--------------------+
+    | len |      pt_len        | c_lenのハフマン符号表
+    +-----+--------------------+
+      5bit        ?? bit
+      TBIT
+
+    +-------+------------------+
+    |  len  |     c_len        | 文字と長さのハフマン符号表
+    +-------+------------------+
+      9bit        ?? bit
+      CBIT
+
+    +---------+--------------------+
+    |   len   |   pt_len           | 位置のハフマン符号表
+    +---------+--------------------+
+     pbit         ?? bit
+                               (pbit=4bit(lh4,5) or 5bit(lh6,7))
+
+    +---------------------+
+    |  圧縮文             |
+    +---------------------+
+
+----------------------------------------------------------------------------
+
+ここまでの解読では細部をかなりはしょったが、decode 処理を見ればわかる
+こともあるであろうことを期待している。以降、decode 処理の内容を処理の
+流れを追うことで確認しよう。
+
+では、いよいよ decode 処理の解読に入る。これが終れば LHA の処理の全貌
+を一応は網羅したことになるので、気合いを入れて進めよう。
+
+decode 処理は以下の関数から成っている。これらは、slide.c の decode 関
+数から呼ばれている。
+
+huf.c:decode_c_st1()          /* 文字、長さの decode 処理 */
+huf.c:decode_p_st1()          /* 位置の decode 処理 */
+huf.c:decode_start_st1()      /* decode 処理の初期化 */
+
+                        (実際には、struct decode_option の decode_c,
+                        decode_p, decode_start を介して呼ばれる)
+
+decode_start_st1() は、以下の通りだ。これは encode_start_st1() のとき
+と特別変わる所はない。特に説明の必要はないだろう。
+
+void
+decode_start_st1( /* void */ )
+{
+    if (dicbit <= 13)  {
+        np = 14;
+        pbit = 4;
+    } else {
+        if (dicbit == 16) {
+            np = 17; /* for -lh7- */
+        } else {
+            np = 16;
+        }
+        pbit = 5;
+    }
+
+    init_getbits();
+    blocksize = 0;
+}
+
+では、decode_c_st1() を見よう。
+
+unsigned short
+decode_c_st1( /*void*/ )
+{
+    unsigned short  j, mask;
+
+    if (blocksize == 0) {
+        blocksize = getbits(16);
+        read_pt_len(NT, TBIT, 3);
+        read_c_len();
+        read_pt_len(np, pbit, -1);
+    }
+    blocksize--;
+    j = c_table[bitbuf >> 4];
+    if (j < NC)
+        fillbuf(c_len[j]);
+    else {
+        fillbuf(12);
+        mask = 1 << (16 - 1);
+        do {
+            if (bitbuf & mask)
+                j = right[j];
+            else
+                j = left[j];
+            mask >>= 1;
+        } while (j >= NC);
+        fillbuf(c_len[j] - 12);
+    }
+    return j;
+}
+
+blocksize == 0 の場合に
+
+    if (blocksize == 0) {
+        blocksize = getbits(16);
+        read_pt_len(NT, TBIT, 3);
+        read_c_len();
+        read_pt_len(np, pbit, -1);
+    }
+
+と、いろいろとやっているがこの部分はすぐ想像がつく。< LHA ファイルの構
+造 > のハフマン符号表を読み込んでいるのだろう。そうして、一度読み込んだ
+後は後続の処理で blocksize 分読み込むまで decode を行うだけだ。
+
+    blocksize--;
+    j = c_table[bitbuf >> 4];
+
+decode 処理はハフマン符号表を表引きするだけなので単純だ。bitbuf >> 4 
+は、bitbuf >> (16 - 12) と読み変えた方がわかりやすい。これは以前何度も
+出た形だが bitbuf の上位 12 bit を取り出している。そうしてその値(ハフ
+マン符号)を元に表引きした結果 j が復号した文字となる。なぜ 12 bit なのか
+はよくわからない後で考えよう。この後の部分で、
+
+    if (j < NC)
+        fillbuf(c_len[j]);
+    else {
+        fillbuf(12);
+        mask = 1 << (16 - 1);
+        do {
+            if (bitbuf & mask)
+                j = right[j];
+            else
+                j = left[j];
+            mask >>= 1;
+        } while (j >= NC);
+        fillbuf(c_len[j] - 12);
+    }
+    return j;
+
+j < NC の場合は c_len[j] でハフマン符号のビット長分を fillbuf() してい
+る。つまり先程表引きした 12 bit のうち c_len[j] bit が本当のハフマン符
+号なのだが、表引きの際に実際のビット長を気にする必要がないのが特徴的だ。
+
+else の部分は、j を求め直していることから、どうやら符号表からの表引き
+では復号できない場合を表しているらしい。この場合、表引きに使用した 12
+bit を捨て(fillbuf(12))、ハフマン木(left[], right[])を辿る事で、復号を
+行っている。この後、fillbuf(c_len[j] - 12) していることから、符号長は 
+12 bit 以上あるのだろう。
+
+decode_c_st1() が decode する圧縮文の構造は図で表すと以下のようになる
+
+----------------------------------------------------------------------------
+
+j < NC の場合 (c_len[j] < 12 の場合)
+
+         <-  c_len[j] ->
+         <----- 12 ------->
+        +--------------+----------
+圧縮文  | ハフマン符号 |
+        +--------------+----------
+
+j >= NC の場合 (c_len[j] > 12 の場合)
+
+         <------------ c_len[j] --------->
+         <------ 12 ------>
+        +------------------+--------------+--------
+圧縮文  |    root          | ハフマン符号 |
+        +------------------+--------------+--------
+
+            root: ハフマン木の根
+
+----------------------------------------------------------------------------
+
+はたして、圧縮処理のときにこのような構造を作った覚えはないのだがどうい
+うことだろう？課題を残しつつ今度は decode_p_st1() (位置の復号処理)を見
+る。
+
+unsigned short
+decode_p_st1( /* void */ )
+{
+    unsigned short  j, mask;
+
+    j = pt_table[bitbuf >> (16 - 8)];
+    if (j < np)
+        fillbuf(pt_len[j]);
+    else {
+        fillbuf(8);
+        mask = 1 << (16 - 1);
+        do {
+            if (bitbuf & mask)
+                j = right[j];
+            else
+                j = left[j];
+            mask >>= 1;
+        } while (j >= np);
+        fillbuf(pt_len[j] - 8);
+    }
+    if (j != 0)
+        j = (1 << (j - 1)) + getbits(j - 1);
+    return j;
+}
+
+先程と同じだ。今度は、bitbuf のうち 8 bit を使用して表引きを行い、
+j < np なら pt_len[j] を詰め、そうでなければハフマン木を辿っている。
+復号した j は位置を表す値の bit 長なので最後に
+
+        j = (1 << (j - 1)) + getbits(j - 1);
+
+で、本当の位置の値を読んでいる(encode_p() がそういう処理だった事を思い
+出そう)。
+
+decode_p_st1() が decode する圧縮文の構造は図で表すと以下のようになる
+
+----------------------------------------------------------------------------
+
+j < np の場合 (pt_len[j] < 8 の場合)
+
+         <- pt_len[j] ->
+         <------ 8 ------->
+        +--------------+----------
+圧縮文  | ハフマン符号 |
+        +--------------+----------
+
+j >= np の場合 (pt_len[j] > 8 の場合)
+
+         <----------- pt_len[j] --------->
+         <------ 8 ------->
+        +------------------+--------------+----------+----------
+圧縮文  |      root        | ハフマン符号 | 位置の値 |
+        +------------------+--------------+----------+----------
+
+            root: ハフマン木の根
+
+----------------------------------------------------------------------------
+
+以上が、decode 処理の概要だ。ここまでの処理は別にどうという事もないだ
+ろう。decode 処理のキモは、圧縮文に埋め込んだハフマン符号表の読み込み
+にある。blocksize == 0 のときに、decode_c_st1() で呼ばれる 
+read_pt_len(), read_c_len() だ。これにより、decode 処理で使用するテーブル
+
+c_table[]       ハフマン符号 -> 文字の変換テーブル
+c_len[]         ハフマン符号 -> ハフマン符号のビット長の対応
+pt_table[]      ハフマン符号 -> 位置のビット長の変換テーブル
+pt_len[]        ハフマン符号 -> ハフマン符号のビット長の対応
+left[]          ハフマン木(左のノード)
+right[]         ハフマン木(右のノード)
+
+が構築される。この部分の方が decode 処理本体よりややこしそうだ。
+では、これらを見て行こう。
+
+    if (blocksize == 0) {
+        blocksize = getbits(16);
+        read_pt_len(NT, TBIT, 3);
+        read_c_len();
+        read_pt_len(np, pbit, -1);
+    }
+
+最初は、read_pt_len(NT, TBIT, 3) から
+
+static void
+read_pt_len(nn, nbit, i_special)
+    short           nn;
+    short           nbit;
+    short           i_special;
+{
+    int           i, c, n;
+
+    n = getbits(nbit);
+    if (n == 0) {
+        c = getbits(nbit);
+        for (i = 0; i < nn; i++)
+            pt_len[i] = 0;
+        for (i = 0; i < 256; i++)
+            pt_table[i] = c;
+    }
+    else {
+        i = 0;
+        while (i < n) {
+            c = bitbuf >> (16 - 3);
+            if (c == 7) {
+                unsigned short  mask = 1 << (16 - 4);
+                while (mask & bitbuf) {
+                    mask >>= 1;
+                    c++;
+                }
+            }
+            fillbuf((c < 7) ? 3 : c - 3);
+            pt_len[i++] = c;
+            if (i == i_special) {
+                c = getbits(2);
+                while (--c >= 0)
+                    pt_len[i++] = 0;
+            }
+        }
+        while (i < nn)
+            pt_len[i++] = 0;
+        make_table(nn, pt_len, 8, pt_table);
+    }
+}
+
+実際、大した事はない。< pt_len[] の出力フォーマット > にしたがって、
+pt_len[] を読み直しているだけだ。read_c_len() も見よう。
+
+static void
+read_c_len( /* void */ )
+{
+    short           i, c, n;
+
+    n = getbits(CBIT);
+    if (n == 0) {
+        c = getbits(CBIT);
+        for (i = 0; i < NC; i++)
+            c_len[i] = 0;
+        for (i = 0; i < 4096; i++)
+            c_table[i] = c;
+    } else {
+        i = 0;
+        while (i < n) {
+            c = pt_table[bitbuf >> (16 - 8)];
+            if (c >= NT) {
+                unsigned short  mask = 1 << (16 - 9);
+                do {
+                    if (bitbuf & mask)
+                        c = right[c];
+                    else
+                        c = left[c];
+                    mask >>= 1;
+                } while (c >= NT);
+            }
+            fillbuf(pt_len[c]);
+            if (c <= 2) {
+                if (c == 0)
+                    c = 1;
+                else if (c == 1)
+                    c = getbits(4) + 3;
+                else
+                    c = getbits(CBIT) + 20;
+                while (--c >= 0)
+                    c_len[i++] = 0;
+            }
+            else
+                c_len[i++] = c - 2;
+        }
+        while (i < NC)
+            c_len[i++] = 0;
+        make_table(NC, c_len, 12, c_table);
+    }
+}
+
+こちらも、< c_len[] の出力フォーマット > にしたがって、c_len[] を読み
+直しているだけだ。
+# このあたりになると解析がかなり雑になっている(当時疲れていたのだろう)。
+# 最終的には後述の「LHA ファイルの構造(まとめ)」にて、再度検討しなおし
+# ているのでそちらを見て欲しい。不明だった部分もここですべて明らかにし
+# ている。
+結局キモとなるのは、make_table() にあるらしい。この関数により、読み込ん
+だ pt_len[], c_len[] から pt_table[], c_table[] (そして、ハフマン木
+left[], right[])を構築しているのだろう。
+
+結局、decode 処理 read_c_len(), read_pt_len() を読んでもなぜこのような
+符号化を行っているのかよくわからなかった。何か統計的な根拠でもあるのだ
+ろうか？それとも LHA にとって歴史的な事情でもあるのか？これに関しては
+別途検証の必要があるだろう。
+
+では、最後の関数 make_table() を解読しよう。これは、maketbl.c で定義さ
+れている。
+
+void
+make_table(nchar, bitlen, tablebits, table)
+    short           nchar;
+    unsigned char   bitlen[];
+    short           tablebits;
+    unsigned short  table[];
+{
+    unsigned short  count[17];  /* count of bitlen */
+    unsigned short  weight[17]; /* 0x10000ul >> bitlen */
+    unsigned short  start[17];  /* first code of bitlen */
+    unsigned short  total;
+    unsigned int    i, l;
+    int             j, k, m, n, avail;
+    unsigned short *p;
+
+    /* (A) */
+    avail = nchar;
+
+    /* initialize */
+    for (i = 1; i <= 16; i++) {
+        count[i] = 0;
+        weight[i] = 1 << (16 - i);
+    }
+
+    /* (B) */
+    /* count */
+    for (i = 0; i < nchar; i++)
+        count[bitlen[i]]++;
+
+    /* (C) */
+    /* calculate first code */
+    total = 0;
+    for (i = 1; i <= 16; i++) {
+        start[i] = total;
+        total += weight[i] * count[i];
+    }
+    if ((total & 0xffff) != 0)
+        error("make_table()", "Bad table (5)\n");
+
+    /* (D) */
+    /* shift data for make table. */
+    m = 16 - tablebits;
+    for (i = 1; i <= tablebits; i++) {
+        start[i] >>= m;
+        weight[i] >>= m;
+    }
+
+    /* (E) */
+    /* initialize */
+    j = start[tablebits + 1] >> m;
+    k = 1 << tablebits;
+    if (j != 0)
+        for (i = j; i < k; i++)
+            table[i] = 0;
+
+    /* (F) */
+    /* create table and tree */
+    for (j = 0; j < nchar; j++) {
+        k = bitlen[j];
+        if (k == 0)
+            continue;
+        l = start[k] + weight[k];
+        if (k <= tablebits) {
+            /* code in table */
+            for (i = start[k]; i < l; i++)
+                table[i] = j;
+        }
+        else {
+            /* code not in table */
+            p = &table[(i = start[k]) >> m];
+            i <<= tablebits;
+            n = k - tablebits;
+            /* make tree (n length) */
+            while (--n >= 0) {
+                if (*p == 0) {
+                    right[avail] = left[avail] = 0;
+                    *p = avail++;
+                }
+                if (i & 0x8000)
+                    p = &right[*p];
+                else
+                    p = &left[*p];
+                i <<= 1;
+            }
+            *p = j;
+        }
+        start[k] = l;
+    }
+}
+
+順に見て行こう。
+
+    /* (A) */
+    avail = nchar;
+
+    /* initialize */
+    for (i = 1; i <= 16; i++) {
+        count[i] = 0;
+        weight[i] = 1 << (16 - i);
+    }
+
+avail はおそらく maketree.c:make_tree() でそうであったように、木の節の
+初期値だろうと予想しておく。count[], weight[] も、maketree.c での 
+len_cnt[] weight[] と同義だろう(すなわち、count[i] は、木の深さ i 番目
+の葉の数、weight[i] は重み)
+
+    /* (B) */
+    /* count */
+    for (i = 0; i < nchar; i++)
+        count[bitlen[i]]++;
+
+count[] を求めている。bitlen[i] は、文字 i のハフマン符号での bit 長で
+あった。やはり count[] は予想通りだ。
+
+    /* (C) */
+    /* calculate first code */
+    total = 0;
+    for (i = 1; i <= 16; i++) {
+        start[i] = total;
+        total += weight[i] * count[i];
+    }
+    if ((total & 0xffff) != 0)
+        error("make_table()", "Bad table (5)\n");
+
+これは、maketree.c:make_code() の前半部分とまったく同じだ。これにより、
+深さ i に対して、以下の対応表ができる(これは前にも書いた。Li は、
+count[i] の値を表している)。
+
+     i     count[i]   weight[i]   start[i]
+ --------------------------------------------
+     1         L1        2^15       0
+     2         L2        2^14      2^15 * L1
+     3         L3        2^13      2^15 * L1 + 2^14 * L2
+     4         L4        2^12      2^15 * L1 + 2^14 * L2 + 2^13 * L3
+
+これが何を表すかと言うと深さ i の符号(つまり bit 長 i の符号)は、
+start[i] から start[i+1]-1 の範囲の値を持つと言う事を意味する。再度、
+例で示そう。
+
+       /\               a: 0
+      a /\              b: 10
+        b c             c: 11
+
+     i     count[i]   weight[i]   start[i]
+ --------------------------------------------
+     1         1        2^15       0
+     2         2        2^14      2^15
+     3         0        2^13      2^15 + 2^14 * 2
+
+これより、深さ 1 の葉 a は、start[1] .. start[2]-1 つまり、
+00000000 00000000 .. 01111111 11111111 の範囲の符号となる。
+深さ 2 の葉 b, c は、start[2] .. start[3]-1 つまり、
+10000000 00000000 ... 11111111 11111111 となる。
+
+    /* (D) */
+    /* shift data for make table. */
+    m = 16 - tablebits;
+    for (i = 1; i <= tablebits; i++) {
+        start[i] >>= m;
+        weight[i] >>= m;
+    }
+
+理由はわからないが、作成するテーブルを引数で渡された bit 数のテーブル
+になるよう写像している。つまり、値の範囲の初期値 start[] と weight[]
+を 16 - tablebits でシフトすることで、
+
+         01111111 11111111
+
+というテーブルの値は(tablebits が 12 であるとすると)、
+
+         00000111 11111111
+         <--> (16 - tablebits{12}) = 4 bit シフト
+
+の値にする。encode するときは、16 bit のテーブルをそのまま使用していた
+にも関わらず decode のときにはテーブルの bit 数を減らしているのだ。まっ
+たく理由がわからない。
+
+当然、encode で使用していたときのテーブルより情報量が減っているので、
+すべてをテーブル参照で decode することはできない。そこで、足りない部分
+は後の処理で木を作ることで補っているようだ。
+
+bit 数を減らす理由を考えてみる。まず表引きの考え方は、
+
+       /\               a: 0
+      a /\              b: 10
+        b c             c: 11
+
+という Huffman 木について、
+
+     00: c_table[00] = a
+     01: c_table[01] = a
+     10: c_table[10] = b
+     11: c_table[11] = c
+
+というテーブル、つまり
+
+         c_table[Huffman符号]=復号語
+
+を作成することで Huffman 符号化したビット列から復号語を得られるようにす
+る。そして、Huffman 符号から文字を得る必要があるので、c_table[] のイン
+デックスには、Huffman 符号が取りうる最大値を指定できなければならない。
+16 bit のHuffman 符号の最大値は 65535 であるから表引きに必要な変数は、
+
+  unsigned short c_table[65535+1]; (unsigned short >= NC-1)
+
+となる。おそらく表の bit 数を減らしているのはこの大きなテーブルを作りた
+くないからではないかと思われる。c_table[] の要素数を最低限必要な数に抑
+えようとすると以下のようになるが、
+
+      0: c_table[ 0=0] = a
+     10: c_table[10=2] = b
+     11: c_table[11=3] = c
+
+この例の場合、c_table[1] が空であるようなテーブルを作成しなければならな
+い。ハッシュ表を作れば可能だがそうはせず、c_table[] の要素数を減らし、
+表引きで表せない部分は木で補っているということだ。
+
+実際の c_table[] の定義は、
+
+  unsigned short c_table[4095+1];
+
+となっており、12 ビット(2^12=4096)の Huffman 符号について表引きが可能と
+なっている。そして、復号語は、0...NC の範囲であるから、
+    c_table[ビット列] < NC
+の場合は、そのまま表引きで
+    c_table[ビット列] >= NC
+の場合は、木のルートノードを示し、その値から木を辿って復号できるように
+なっている。図示すると
+
+----------------------------------------------------------------------------
+       .
+      / \
+     a   .           ... 階層:1   `.
+        / \                        |
+        b            ... 階層:2    `> 表引き
+                           :       '
+                           :       |
+            .        ... 階層:11   |
+           / \                     |
+          x   y      ... 階層:12  .' <- 表引きの結果 y が(>=NC)の場合、
+             / \                        木の続きがあることを示す
+            z   .    ... 階層:13  `.
+                                   |
+                           :        >   left[]/right[]で表現 (階層12がroot)
+                     ... 階層:16  .'
+----------------------------------------------------------------------------
+
+階層 12 より下(13 以上の bit 数の Huffman 符号)の Huffman 木について
+left[], right[] で表しているようだ。
+
+上の例で、13 ビットの Huffman 符号で符号化される復号語 z については、
+y にその木のルートノードの値(y > NC)が割り当てられる。
+
+図から明らかだが、復号語そのものを指す 12 bit の符号(たとえば x)と、木
+のルートノードを指す 12 bit の符号(たとえば y)が同じ符号となることはな
+い。これは Huffman 符号が語頭条件を満たすからである。
+
+では、y に割り当てる値はどのように決まるかというとおそらく NC 以上の数
+値を連番か何かで割り当てているのではないかと思われる。これについてはこ
+れ以降で確認する。
+
+なお、階層が深い Huffman 木とは、bit 長が長い符号であり、bit 長が長いと
+いうことは出現頻度が低いはずであるから、left[], right[] で木を辿る回数
+は少ないはずである。これは理にかなっている。
+
+あと、この木に必要なサイズはいくつであるかという点が気になる。これは、
+階層 13 以上のノードの数となるが、階層 n の二分木のノード(ここでは、葉
+および節をノードと呼ぶことにしている。「ノード」と「節」は本来同じ意味
+なのだがもう書いてしまったので仕方ない)の数が 2^(n+1) - 1 である(階層
+n の葉の数は 2^n で、節の数は 2^n-1)から、
+
+    階層 12 のノードの数は、(2^(12+1)-1) = 8191
+    階層 16 のノードの数は、(2^(16+1)-1) = 131071
+
+となり、その差は 131071 - 8191 = 122880 となる。単純に考えると、最悪の
+場合を想定して left[], right[] 合計で 122880 個の領域が必要であることに
+なる。そうすると領域を節約するという目的からは元も子もないこととなる。
+
+しかしよくよく考えるとその心配はないようだ。実際のところはハフマン木全
+体の葉の数は文字種の数 NC しか存在しないため(ハフマン木構築アルゴリズム
+及びエンコード処理を確認) 2*NC-1がハフマン木全体のノード数である。そし
+て、
+
+    階層 12 の葉の数の最小値 12
+
+であることから、階層13以下のノード数は
+
+    木で表現する最大の葉の数 NC-12
+
+となり木のノード数の最大値は 2*(NC-12)-1 となる。さらに、この木の葉は
+left right の添え字にならないのでその分の領域は厳密には不要である。
+
+# 後の解析でわかることだが、left, right の添え字は NC 以上であるため
+# 0...NC の範囲の領域は(c_len については)使われない。また、変数 left
+# right はエンコード処理でハフマン木を作る際に使用した変数を流用してい
+# るため領域が足りないということはない。
+#
+# 表引きを行わずに Huffman 木を完全に読み込むことを考えると、left,
+# right は、c_len については、
+#   NC ... 2*NC-1
+# が使用され、位置(p_len)に対する Huffman 木の構築時には
+#   np ... 2*np-1
+# の範囲が使用される。
+#
+# c_len, p_len の Huffman 木は同時に存在するので、left, right ともに
+# 下図の領域が同時に使用されることになる。
+# (t_len は c_len の読み込みが完了した時点で不要となるため、この図には
+# 表していない)
+#
+#   0         np     2*np-1      NC                            2*NC-1
+#   +---------+-------+----------+------------------------------+
+#   |未使用域 |使用域 | 未使用域 | 使用域                       |
+#   +---------+-------+----------+------------------------------+
+#
+#                                                         np: 14〜17
+#                                                         NC: 510
+#
+# ソースを見てみても、このことはなかなか気がつきにくい。やはり、left,
+# right は各 Huffman 符号用に領域を割り当てた方がわかりやすいだろう。
+
+続きを見ていこう、(E) の処理
+
+    /* (E) */
+    /* initialize */
+    j = start[tablebits + 1] >> m;
+    k = 1 << tablebits;
+    if (j != 0)
+        for (i = j; i < k; i++)
+            table[i] = 0;
+
+table[] の初期値として 0 を設定している。
+
+Huffman 符号である j には、start[tablebits + 1] つまり、ビット長
+tablebits の最大の Huffman 符号+1が設定される。(繰り返しになるが、ビッ
+ト長 i の Huffman 符号は、start[i] から start[i+1]-1の範囲の符号である)
+m で右シフトしているのは、(D) では、tablebits までの start[i] しか 右
+シフトしていないためである。
+
+k は、1 << tablebits から tablebits + 1 番目のビットが立った数値となる。
+この値はつまりは tablebits ビットの Huffman 符号の最大値 + 1 である。
+
+そして、start[j...k] の範囲について 0 を設定している。結局 tablebits の
+ビット長の範囲で割り当てられることがない Huffman 符号に対して 0 で初期
+化しているということのようだ。
+割り当てられることがない Huffman 符号ということは 0 で初期化しているの
+はこの後の処理で木のノードになる予定の領域だと思われる。
+
+ちょっと疑問なのだが、if (j != 0) は必要なのだろうか？つまり、j = 0 と
+して、table[] の全要素について 0 で初期化しても何も問題はないのではない
+か？そしてそれなら make_table() に table[] のサイズ(sizeof)を渡し
+memset() にて 0 で初期化した方が(機械語の命令数が少なくなるので)速いの
+ではないだろうか？まあ、速さは良いとしても memset() の方がよりわかりや
+すいと思う。
+
+次に (F) の処理。少し大きいので下記の通り (F.1), (F.2) と細分化してみた。
+
+    /* (F) */
+    /* create table and tree */
+    for (j = 0; j < nchar; j++) {
+        k = bitlen[j];
+        if (k == 0)
+            continue;
+        /* (F.1) */
+        l = start[k] + weight[k];
+        if (k <= tablebits) {
+            /* code in table */
+            for (i = start[k]; i < l; i++)
+                table[i] = j;
+        }
+
+        /* (F.2) */
+        else {
+            /* code not in table */
+            p = &table[(i = start[k]) >> m];
+            i <<= tablebits;
+            n = k - tablebits;
+            /* make tree (n length) */
+            while (--n >= 0) {
+                if (*p == 0) {
+                    right[avail] = left[avail] = 0;
+                    *p = avail++;
+                }
+                if (i & 0x8000)
+                    p = &right[*p];
+                else
+                    p = &left[*p];
+                i <<= 1;
+            }
+            *p = j;
+        }
+        start[k] = l;
+    }
+
+この部分は一時変数の量が多い、i,j,k,l,m,n,p まで使われている。
+(しかも、前の処理までと変数の用途が違ってたりするので、複雑になっている)
+
+一旦、以下に整理してみた。(どの変数の添え字に使われているかなどからひと
+めで判断してみた結果である。そして、n, p についてはひとめではわからなかっ
+た)。
+
+    i: Huffman 符号
+    j: 復号文字
+    k: j の Huffman 符号のビット長(i のビット長)
+    l: ビット長 k に対するHuffman 符号の終値 (start[k] <= Huffman(k) < l)
+    m: Huffman 符号表をshiftするビット数
+    n: ??
+    p: ??
+
+これを踏まえて処理内容を見てみよう。まず、(F)全体について
+
+    /* (F) */
+    /* create table and tree */
+    for (j = 0; j < nchar; j++) {
+        k = bitlen[j];
+        if (k == 0)
+            continue;
+        /* (F.1) */
+        /* (F.2) */
+
+        start[k] = l;
+    }
+
+復号文字 j = 0 ... nchar をループしている(j が復号文字であることは、
+bitlen[] の添え字であることからわかる)。
+
+そして、k = bitlen[j] が 0 であれば、(Huffman 符号化されていなければ)そ
+の文字はスキップしている。ここは、良いだろう。
+
+(F.1), (F.2) は、Huffman符号化されている文字 j について
+の処理となる。(最後の start[k] = l は後で考えよう)
+
+処理の目的から大雑把に
+
+    (F.1) k <= tablebits の場合、表引き可能な範囲なので、
+    table[i] に復号文字をセット。
+
+    (F.2) k > tablebits の場合、表引き不可能な範囲なので、
+    left[],right[]に復号文字をセット。
+
+といった処理をしていることが予想できる。では、(F.1) を見てみる。
+
+        /* (F.1) */
+        l = start[k] + weight[k];
+        if (k <= tablebits) {
+            /* code in table */
+            for (i = start[k]; i < l; i++)
+                table[i] = j;
+        }
+
+ビット長 k <= tablebits の場合、ビット長 k が取りうる範囲の Huffman 符号
+について、文字 j を割り当てている。
+ビット長 k が取りうる範囲の Huffman 符号とは
+
+    start[k] <= Huffman符号 i < l
+
+である。例で示すと(簡便化のために、最大の Huffman 符号長を 2 とする)
+
+       /\               a: 0
+      a /\              b: 10
+        b c             c: 11
+
+文字 a は、1 ビットで、00...10 の範囲(つまり、00 と 01)
+文字 b は、2 ビットで、10...11 の範囲(つまり、10)
+
+となる。ここで、文字 c については文字 b と同じ符号が割り当てられるかのように
+見えるが、実際は(F) のループの末尾に出てきた
+
+        start[k] = l;
+
+によって、ビット長 k に対する初期値 start[k] が変更されるため、その心配
+はないようだ。
+
+次に、(F.2)
+
+        /* (F.2) */
+        else {
+            /* code not in table */
+            p = &table[(i = start[k]) >> m];
+            i <<= tablebits;
+            n = k - tablebits;
+            /* make tree (n length) */
+            while (--n >= 0) {
+                if (*p == 0) {
+                    right[avail] = left[avail] = 0;
+                    *p = avail++;
+                }
+                if (i & 0x8000)
+                    p = &right[*p];
+                else
+                    p = &left[*p];
+                i <<= 1;
+            }
+            *p = j;
+        }
+
+ちょっと複雑だが難しいことはない。まず、
+
+    p = &table[(i = start[k]) >> m];
+
+の部分は、
+
+    i = start[k];
+    p = &table[i >> m]
+
+であり、i は Huffman 符号の初期値である。i が m で右シフトされているが、
+初期化部分の (D) では、tablebits までのインデックスに対する値
+(start[1..tablebits])しかシフトしておらず、この (F.2) の部分は k >
+tablebits であるから start[k] は m でシフトされていない Huffman 符号と
+なっている。
+
+p は、Huffman符号 i の table 上の位置を指す。後で、*p には木のルート位
+置を記録することが予想される。
+
+次に、
+
+    i <<= tablebits;
+
+i を tablebits でシフトすることで、Huffman 符号 i は最上位の tablebits
+を除いた残りのビット部分になる。この残りのビット部分を木で表す。
+
+次に
+
+    n = k - tablebits;
+
+n は、書き換えた i のビット長を示す。木には深さ n の階層が作成されるの
+だろう。
+
+----------------------------------------------------------------------------
+                        k: Huffman 符号 i のビット長
+                |----------------|
+
+                 tablebits (表引きで復号する部分)
+                |-----------|
+                +-----------+----+
+  Huffman 符号 i|           |xxxx|
+                +-----------+----+
+                            |----|
+                              n: 木を辿ることで復号する部分
+
+tablebits ビットシフトにより、書き換えた i は、xxxx の部分が最上位ビッ
+トとなる。
+
+                +----+-----------+
+  Huffman 符号 i|xxxx|           |
+                +----+-----------+
+                |----|
+                  n: 木を辿ることで復号する部分
+
+----------------------------------------------------------------------------
+
+そうして、書き換えた i について、木を構築する。
+
+            /* make tree (n length) */
+            while (--n >= 0) {
+                /* (F.2.1) */
+                if (*p == 0) {
+                    right[avail] = left[avail] = 0;
+                    *p = avail++;
+                }
+                /* (F.2.2) */
+                if (i & 0x8000)
+                    p = &right[*p];
+                else
+                    p = &left[*p];
+                i <<= 1;
+            }
+            /* (F.2.3) */
+            *p = j;
+
+(F.2.1) *p が 0 であれば、*p に avail として、新たな根を割り当てその右
+と左の子は 0 で初期化しておく。
+
+(F.2.2) Huffman 符号(の tablebits 以降のビット) i について最上位ビット
+が立っていれば右の子 right、ビットが立っていなければ左の子 left を作成
+(領域を p で予約)する。
+
+ループによってビットパターンに沿って *p には、avail++ が順に割り当てられる。
+
+avail の初期値は nchar なので、*p >= nchar (c_table[] なら NC)である。
+
+この while ループを抜けた後に(F.2.3)にて
+
+    *p = j;
+
+が設定され、木の葉には、*p < nchar である値が設定されている。(そしてこ
+れが求める復号文字である。)
+
+(F.2.1) で、if (*p == 0) としている理由は、
+
+        .
+        \
+         .  <- p
+        /
+
+と p が既に割り当てられており、その節に
+
+        .
+        \
+         .  <- p
+        / \
+
+と右の子が追加される場合を想定している。この時点で (E) にて table を 0
+で初期化している理由がわかった。木の根が割り当てられているかどうかの判
+定が必要だから初期化で未割り当てにしておく必要があるということだ。もち
+ろん (E) で書いた通り table 全体を 0 で初期化しても問題はないしその方が
+わかりやすいと思った。
+
+ここまで、c_table[] を作成する場合だけを見てきたが、pt_table の場合も考
+え方は同じなので解析の必要はないだろう。
+
+ただ、この段階で表引きのビット数が c_table については 12 が p_table につ
+いては 8 が選ばれている理由が不明である。これは、想像だが pt_table が符号化する
+文字種は少ないので pt_table については 8 bit のテーブルを使っても表引きの確率が
+高いのではないだろうか。つまり、領域(pt_table のサイズ)の節約を優先しているので
+はないかと思う。
+
+
+LHA ファイルの構造(まとめ)
+--------------------------
+
+以上で LHa for UNIX についての一通りの処理を見たことになる。ここからは
+実装については極力触れずに LHA ファイルの構造(圧縮形式)についてまとめて
+みよう。また、ここまで細部についてなぞのままとしていた部分があるのでこ
+れらも再検討して明らかにしよう。
+
+----------------------------------------------------------------------------
+< LHA ファイルの構造(1 ブロック分) >
+
+    +-----------+
+    | blocksize |
+    +-----------+
+       16bit
+
+ t_len: c_len のハフマン木           |
+    +-----+--------------------+     |  +-----+-----+
+    | len |       t_len        |     |  |  0  |root |
+    +-----+--------------------+     |  +-----+-----+
+      TBIT        ?? bit             |  TBIT  TBIT
+                                     |
+ c_len: 文字と長さのハフマン木       |
+    +-------+------------------+     |  +-------+-------+
+    |  len  |     c_len        |     |  |  0    | root  |
+    +-------+------------------+     |  +-------+-------+
+      CBIT        ?? bit             |   CBIT    CBIT
+                                     |
+ p_len: 位置の(ビット長の)ハフマン木 |
+    +-----+--------------------+     |  +-----+-----+
+    | len |      p_len         |     |  |  0  |root |
+    +-----+--------------------+     |  +-----+-----+
+     pbit         ?? bit             |
+
+ 圧縮文(文字と長さ、位置のビット長のハフマン符号と位置の値)
+    +---------------------+
+    |  圧縮文             |
+    +---------------------+
+
+
+        method  maxmatch  dicsiz   dicbit   np(dicbit+1) pbit(np <= 2^pbit)
+        ------------------------------------------------------------------
+        -lh4-        256  2^12     12       14 (or 13?)  4 (14 <= 2^4)
+        -lh5-        256  2^13     13       14           4 (14 <= 2^4)
+        -lh6-        256  2^15     15       16           5 (16 <= 2^5)
+        -lh7-        256  2^16     16       17           5 (17 <= 2^5)
+
+        threashold 3
+        NC         256+maxmatch-threshold+1{510}
+        CBIT       9 (NC <= 2^9)
+
+        MAXDEPTH   16
+        NT         MAXDEPTH+1
+        TBIT       4 (NT <= 2^4)
+----------------------------------------------------------------------------
+
+# ソース上 pt_len と書いていた部分は、以降の説明のために p_len, t_len
+# と名前を変更している。変数 pt_len は単に領域の節約のために使い回され
+# ていただけでありいわば実装の都合であるからだ。
+
+上記は、LHA ファイルの構造(ヘッダを除く)を表したものである。LHA ファイ
+ルはヘッダと上記ファイル構造の集まりで 1 ファイルの圧縮ファイルとなり、
+それが複数集まってアーカイブを構成する。また、約束事としてアーカイブの
+最後は 1 バイトの 0 が付加されることとなっている。
+
+圧縮形式は method によってパラメータが変化する。ここでは、method
+lh4,5,6,7 の形式しか触れないので method の違いは slide 辞書の辞書サイズ
+の違いしかない。ただし、辞書のサイズの違いに連動して圧縮形式に影響を与
+える変数があるのでこれも上記にまとめている。(小文字はその変数、大文字は
+定数を意味する)
+
+図中 t_len, c_len, p_len は、Huffman 木の情報を格納した領域を表し、「圧
+縮文」が平文を圧縮した本体となる。
+
+また、3 つのハフマン木の出力形式についてハフマン木が構築できない場合の
+形式を右側に併記した。これは、復号語が 1 種類しかない場合を示しており
+root がその復号語となる。例えば、c_len がこの形式で書かれていた場合は圧
+縮文を見ずに blocksize 分 root を出力すれば復号となる。なお、c_len がこ
+の形式の場合 c_len のハフマン木を示す t_len も右側の形式になるが、この
+ときの t_len の root の値は 0 にする事になっているようだ(ただ、復号処理
+はこの値に依存しない方が良いだろう)。
+
+圧縮文は、文字 c(0 .. 255)と <長さ len, 位置 off> を Huffman 木で符号化
+した Huffman 符号の並び(と位置の値)で表される。
+
+<len, off> は、slide 辞書法での圧縮結果であり、辞書上の off 位置の len
+文字をこの形式で表している。辞書とは、現在復号を開始している位置から辞
+書サイズ分遡った復号済みの平文を指す。
+
+位置 off は、0 が「1文字前」を現す。従って辞書サイズ dicsiz が 2^3 の場
+合を例に考えると位置の値が 2^3-1 の場合では、2^3 文字前を示すことになる。
+
+         辞書サイズ
+	 (復号済みの平文)
+        |-------------|
+        8 7 6 5 4 3 2 1 x
+        ^                \
+        |                 復号開始位置
+        x から 8 文字前の位置
+
+従って、off の値の範囲は 0 ... 2^dicbit である。
+
+長さ len の値は 256 の場合に文字列長 3 バイトを示す。つまり、len に対し
+て len-256+3 が実際の長さを示す。(ただし、-lzs- の場合は len-256+2 が実
+際の長さとなる)
+
+len の値が 256 から始まるのは、1 バイトの文字 c の範囲 0..255 と重なら
+ないようにするためである。(長さは、文字と同じ Huffman 木で符号化される)
+
+実際の長さが 3 から始まるのは、<len,off> の組が 4 バイトで表されるため、
+マッチ長として 2 文字以下を <len,off> の形式で表すと圧縮ではなく伸長に
+なってしまうからである。
+
+# 長さが 3 の場合も同じように思えるがなぜだろうか？
+# <len,off> はより正確には 3 バイトと 1 ビットである。というのも len が
+# 256 から始まるから len の情報は 9 ビット必要である。len が 256...510
+# の範囲なので 8 ビットのようにも思えるが文字 c との判別のための情報と
+# して 1 ビット余計に必要なのである。これは予想だが、当時 -lh5- の辞書
+# サイズであれば位置は 13 ビットしか使用しないため、<len,off> は 22 ビッ
+# トと見なせる。従って 3 バイトは <len,off> の形式にした方が良いと判断
+# したのではないだろうか？では、-lh7- の場合は、長さの最小値は 4 にした
+# 方が良いのだろうか？おそらく位置の値に 16 ビットすべて使用する確率が
+# 低く多くの場合は効果がないのではないかと思う。
+
+また、maxmatch{256}が最大マッチ長であり、このときの len の値は
+256+maxmatch-3{509=NC-1} である。
+
+             len(復号語)            実際の長さ
+             ----------------------------------
+             256..256+maxmatch-3    3..maxmatch
+
+これらを圧縮した形式「圧縮文」は Huffman 符号の連続(および位置の値。後
+述)である。圧縮文のサイズは上図の blocksize で表され、blocksize 数の文
+字数の情報が出力されている。ここで、「文字数」は <長さ, 位置> の組も 1
+文字としてカウントされる。文字なのか、<長さ, 位置> の組なのかの判別は、
+
+    復号した1文字 >= 256 の場合
+      長さを示す。(そしてその直後に位置の Huffman 符号がある)
+
+    復号した1文字 < 256 の場合
+      文字を示す。
+
+となっている。そして、文字と長さの Huffman 符号は、Huffman 木の情報を示
+す c_len により復号され、位置の Huffman 符号は、p_len により復号される。
+
+位置の Huffman 符号は位置の情報の上位ビットが 0 である部分を除いたビッ
+ト長を符号化したものであり位置そのものの符号ではない。従って位置の符号
+は
+
+          +------------------------------+----------+
+          | 位置のビット長の Huffman 符号| 位置の値 |
+          |  (p_lenから復号)             |          |
+          +------------------------------+----------+
+
+と Huffman 符号に続いて実際の値を示すビット列が出力されている。例で示す
+と以下の通りだ。
+
+----------------------------------------------------------------------------
+位置(off)の出力例
+
+off = 64 の場合
+
+     |---- 16 bit -------|
+     +----+----+----+----+
+off  |0000 0000 0100 0000|
+     +----+----+----+----+
+                 |-7 bit-|
+
+この圧縮文は以下(長さが 7 bit であるという情報(Huffman符号化)と値のペア)
+
+                       |-6 bit-|
+     +-----------------+-------+
+     | 7 のHuffman符号 |00 0000|
+     +-----------------+-------+
+
+この例で 必要ビットである 7 bit 目は必ず 1 であるため値の部分は 6 bit
+出力すればよい。
+
+off = 1 の場合
+
+     |---- 16 bit -------|
+     +----+----+----+----+
+off  |0000 0000 0000 0001|
+     +----+----+----+----+
+                       |-|
+                        1 bit
+
+この圧縮文は以下(長さが 1 bit であるという情報のみ)
+
+     +-----------------+
+     | 1 のHuffman符号 |
+     +-----------------+
+
+off = 0 の場合
+
+     |---- 16 bit -------|
+     +----+----+----+----+
+off  |0000 0000 0000 0000|
+     +----+----+----+----+
+                        ||
+                         0 bit
+
+この圧縮文は以下(長さが 0 bit であるという情報は値が 0 と見なされる)
+
+     +-----------------+
+     | 0 のHuffman符号 |
+     +-----------------+
+----------------------------------------------------------------------------
+
+# 位置を直接 Huffman 符号化しない理由は位置を指す値は slide 辞書上の任
+# 意の位置を指すためデータの範囲が広く(-lh7- の場合で 0 ... 2^16)
+# Huffman 符号化による圧縮の効果が期待できないためだと思われる。一方、
+# 位置情報は辞書上の比較的近い位置にマッチしやすいはずであるから Huffman
+# 符号化の対象であるビット長は小さい値に偏りやすいはずだ。(偏りがある
+# と Huffman 符号化の効果が高い)
+
+Huffman 木の情報をファイルに出力する際 p_len, c_len は、それぞれに適し
+た形式で圧縮して出力される。特に c_len は、さらに、t_len により
+Huffman 符号化することで圧縮を行う。
+
+ハフマン木 {p,c,t}_len はどの復号語がハフマン木のどの階層にあるかの情報
+により表されている。これだけの情報だと木を一意に表すことができないよう
+に思えるが、実際は
+
+         Huffman 木1     Huffman 木2
+              .             .
+             / \           / \
+            .   a         a   .
+           / \               / \
+          c   b             b   c
+
+Huffman 木1 と Huffman 木2 は枝の伸び方と葉に文字を振る順番の違いでしか
+ない。そこで、LHA では、以下の規則を設けることで、{p,c,t}_len の情報だ
+けで木を構築できるようにしている。
+
+       o 右の木を優先して作成する。(右の枝をビット 1 とする)
+       o 同じ階層の復号語の割り当てはコード順に左から割り当てる。
+
+例えば、
+
+    c_len['a'] = 2
+    c_len['b'] = 1
+    c_len['c'] = 3
+    c_len['d'] = 3
+
+という情報が書かれている場合、
+
+    階層 1 に 1 個の葉(値が 1 である c_len[] が 1 個)
+    階層 2 に 1 個の葉(値が 2 である c_len[] が 1 個)
+    階層 3 に 2 個の葉(値が 3 である c_len[] が 2 個)
+
+があるので以下の Huffman 木の形に決まる(右の木を優先して作成する)。
+
+            .
+           / \
+          .   .       -- 階層1
+             / \
+            .   .     -- 階層2
+               / \
+              .   .   -- 階層3
+
+そして各階層毎に文字をコード順に割り当てると
+
+            .
+           / \
+          b   .       -- 階層1
+             / \
+            a   .     -- 階層2
+               / \
+              c   d   -- 階層3
+
+
+と一意に定まることとなる。(「階層毎のコード順」の意味が正確に伝わるよう
+あえて、b と a を逆にしてみた。)
+
+なお、{p,c,t}_len の値はある文字の階層の位置を示すが、これはつまりある
+文字を Huffman 符号化したときの符号長(bit 長)を示していることになる。以
+降、{p,c,t}_len は添え字が復号語、値が符号長を表す配列であるものとして
+説明を行う。この配列のサイズは圧縮対象の文字集合の要素数であり、各要素
+は 0..16 の値を持つ。(LHA の Huffman 木のルールで木の階層は 16 までとなっ
+ている)そして、値 0 はその文字が平文に現れないことを示す。
+
+----------------------------------------------------------------------------
+        Huffman 木　   要素数   値の範囲  要素数のビット長
+        (配列)                  (符号長)
+        p_len          np       0..16     pbit
+        c_len          NC       0..16     CBIT
+        t_len          NT       0..16     TBIT
+
+                      要素数は圧縮対象の文字集合の数
+                      c_len[x]=0 の場合、文字 x は複合した結果に現れない
+                      要素数のビット長は要素数を表現するのに必要なビット
+                      長(この後で出てくる)
+----------------------------------------------------------------------------
+
+では、Huffman 木の情報の出力形式について整理しよう。
+
+まず、p_len[] の出力フォーマットを下記に示す。
+
+----------------------------------------------------------------------------
+< p_len[] の出力フォーマット >
+
+             0      pbit{4 or 5}
+             +-------+-----------+-----------+--   --+-----------+
+             |   n   |  p_len[0] |  p_len[1] | ...     p_len[n-1]|
+             +-------+-----------+-----------+--   --+-----------+
+
+p_len[i] <= 6 の場合
+
+              0     3bit
+              +-----+
+    p_len[i]  | | | |
+              +-----+
+
+p_len[i] >= 7 の場合
+
+              0              p_len[i] - 3
+              +----------------+
+    p_len[i]  |1 1 1 1 ... 1 0 |
+              +----------------+
+
+p_len[n...np] は、0 となる。
+
+----------------------------------------------------------------------------
+
+先にも書いた通り p_len は位置の値の必要ビット長を Huffman 符号化したと
+きの木の情報である。スライド辞書のサイズは dicsiz であり -lh7- の場合で
+16 bit で位置を指すことができるから、p_len は位置のビット長 0 .. 16 の
+17個(np個)の値を Huffman 符号化した結果(の符号長)である。
+
+そして p_len 自体の出力については、0 .. 6 の値(Huffman 符号長)について
+は 3 bit で、それ以上の値については 0 が現れるまでのビット数で表すよう
+になっている。
+
+なお p_len は np 個の固定長配列だが、出力形式としては先頭に pbit 幅
+の p_len の要素数を出力している。これはなぜかというと p_len の後方の値
+(p_len[n...np])が 0 である場合にその要素を出力しないで済むようにするた
+めである。これは他の Huffman 符号についても同様である。
+
+# なぜ、このような形式になっているか考えてみた。
+#
+# p_len の値の範囲は、0 .. 16 であるから 1 要素は 6 bit で表現可能であり、
+# 単純に出力した場合を考えると 6 * 17 = 102 bit で表現可能である。
+#
+# 一方、p_len の出力形式の場合、LHA の Huffman 木の階層は最大 16 階層であ
+# ることから、最悪すべての p_len[] についてビット数の形式(p_len[] >= 7)
+# が使われた場合 1 つの p_len[] に 16-3 bit * 17 = 221 bit 使うことにな
+# り最悪の使用領域は大きくなってしまうように思えてしまう。
+#
+# しかし、実際にはそうはならない。というのも np が 17 であるから
+# Huffman 木の葉の数は最大でも 17 にしかならない。そして葉の数が np で
+# 最も Huffman 木が深くなるのは
+#
+#        .
+#       / \
+#      .   .        --  1 階層目
+#         / \
+#        .   .      --  2 階層目
+#           / \
+#          .   .    --  3 階層目
+#              :
+#              .
+#             / \
+#            .   .  -- 16 階層目
+#
+# となる場合で、この場合の p_len の出力ビット長は
+#
+#    2*(16-3) + (15-3) + ... (7-3) + 6*3
+#  = 2*13 + 12 +  ... 4 + 18
+#  = 167 bit
+#
+# である。単純に出力する場合に比べると 65 bit 増える。また、1 階層減ら
+# した場合は、
+#
+#        .
+#       / \
+#      .   .        --  1 階層目
+#         / \
+#        .   .      --  2 階層目
+#           / \
+#          .   .    --  3 階層目
+#              :
+#             / \
+#            .   .    -- 13 階層目
+#               / \
+#             .     .
+#            / \   / \
+#           .   . .   .  -- 15 階層目
+#
+#    4*(15-3) + (13-3) + ... (7-3) + 6*3
+#  = 4*12 + 10 + ... 4 + 18
+#  = 115 bit
+#
+# である。なお、この木の場合も葉は np 個ある。もう 1 階層減らしてみよう。
+#
+#        .
+#       / \
+#      .   .        --  1 階層目
+#         / \
+#        .   .      --  2 階層目
+#           / \
+#          .   .    --  3 階層目
+#              :
+#           /     \
+#          .       .        -- 12 階層目
+#         / \     /  \
+#        .   .   .     .    -- 13 階層目
+#               / \   / \
+#              .   . .   .  -- 14 階層目
+#
+#
+#    4*(14-3) + 2*(13-3) + (11-3) + ... + (7-3) + 6*3
+#  = 4*11 + 2*10 + 8 + ... 4 + 18
+#  = 112 bit
+#
+# この調子で、さらに減らすと
+#
+# 13 階層
+#    4*(13-3) + 2*(12-3) + (10-3) + ... + (7-3) + 6*3
+#  = 4*10 + 2*9 + 7 + ... + 4 + 18
+#  = 98
+#
+# 13 階層目で単純に出力するよりも小さくなった。感覚的には、あまり効果は
+# 期待できないように見える。これは恐らくは p_len については符号長が 6
+# 以下になる場合が多いのであろう(すべてが 6 以下であれば、3 * 17 = 51
+# bit であり 51 bit 削減できる)。階層が 6 である Huffman 木の葉の数は最
+# 大 2^6 {64} であるから NP{17} 種類の平文を格納する率が高いのであろう。
+
+続いて c_len[] の出力フォーマットを示す。
+
+----------------------------------------------------------------------------
+< c_len[] の出力フォーマット >
+
+             0       CBIT{9}
+             +-------+-----------+-----------+--   --+-----------+
+             |   n   |  c_len[0] |  c_len[1] | ...     c_len[n-1]|
+             +-------+-----------+-----------+--   --+-----------+
+
+c_len[i] == 0 の場合
+
+ 0 が続く数を count とすると、
+
+ count == 1 の場合
+
+                t_len[0]
+              <---------->
+             +------------+
+             |  t_code[0] |
+             +------------+
+
+ count == 2 の場合
+
+                t_len[0]     t_len[0]
+              <----------> <---------->
+             +------------+------------+
+             |  t_code[0] |  t_code[0] |
+             +------------+------------+
+
+ count == 3..18 の場合
+
+                t_len[1]    4 bit
+              <----------> <------>
+             +------------+-------+
+             |  t_code[1] |count-3|
+             +------------+-------+
+
+ count == 19 の場合
+
+                 t_len[0]    t_len[1]    4 bit
+              <----------> <----------> <------>
+             +------------+------------+-------+
+             |  t_code[0] |  t_code[1] |count-3|
+             +------------+------------+-------+
+
+  count >= 20 の場合
+
+                 t_len[2]    CBIT{9}
+              <----------> <------>
+             +------------+--------+
+             |  t_code[2] |count-20|
+             +------------+--------+
+
+c_len[i] > 0 の場合
+
+               t_len[c_len[i]+2]
+              <----------------->
+             +-------------------+
+             | t_code[c_len[i]+2]|
+             +-------------------+
+
+c_len[n...NC] は、0 となる。
+
+----------------------------------------------------------------------------
+
+c_len[] の値はある程度 0 が連続する場合が多いことが期待できる。
+c_len[i]=0 の場合というのはその文字(i)が平文に現れない場合を示す。
+ASCII テキストファイルの圧縮なら 0..127 の範囲のコードしか使われないた
+めそれ以外は 0 になるなどである。そして c_len を単純に出力することを考
+えたとき c_len[i]=0 である情報を多数出力することになり領域が無駄である
+(c_len は NC{255+256+2-3=510} 個の要素を持ちその中で未使用文字や未使用
+長が多数あることを想定している)。そこで 0 が連続して現れる特徴を生かし
+
+    o c_len[]=0 が連続で1個
+    o c_len が連続で 3〜18 個
+    o c_len が連続で20個以上(20〜NC{510})
+
+をそれぞれ一つの文字と見なして Huffman 符号化することで c_len 自体の出
+力サイズを小さくしている。これは 0 の出現頻度を単純に Huffman 符号化す
+るよりも効果が期待できる。
+
+上図で t_code は c_len を Huffman 符号化したときの符号表を示しており
+
+    o t_code[0] ... c_len[i] は 0 が 1 個
+    o t_code[1] ... c_len[i] は 0 が 3〜18 個(続く4 ビットのビット列で
+                    個数がわかる)
+    o t_code[2] ... c_len[i] は 0 が 20〜NC-1個(続く CBIT ビットのビット
+                    列で個数がわかる)
+    o t_code[x] ... c_len[i]=x-2  (x>2)
+
+と復号することになる。c_len[i] = 0 が 2 個あるいは 19 個続く場合は
+
+    t_code[0] が 2 個
+    t_code[0] と t_code[1] が 1 個ずつ
+
+で出力されている。
+
+最後に、t_len[] の出力フォーマットを示す。
+
+----------------------------------------------------------------------------
+< t_len[] の出力フォーマット >
+
+                                             2 bit
+   0      TBIT{5}                           |--|
+   +-------+----------+----------+----------+--+----------+-    -+-----------+
+   |   n   | t_len[0] | t_len[1] | t_len[2] | x|t_len[x+3]| ...  | t_len[n-1]|
+   +-------+----------+----------+----------+--+----------+-    -+-----------+
+
+t_len[i] <= 6 の場合
+
+              0     3bit
+              +-----+
+    t_len[i]  | | | |
+              +-----+
+
+t_len[i] >= 7 の場合
+
+              0             t_len[i] - 3
+              +----------------+
+    t_len[i]  |1 1 1 1 ... 1 0 |
+              +----------------+
+
+t_len[2] の直後は 2 bit の情報が付加される。この値を x{0..3} とすると、
+t_len[3 .. x+2] の範囲で 0 が続くことを意味し、この 2 bit 以降は、
+t_len[x+3] が続くことになる。x が 0 の場合は、t_len[3] は 0 ではない。
+
+t_len[n...NT] は、0 となる。
+
+----------------------------------------------------------------------------
+
+基本的な考えは p_len[] の場合と同じである(t_len[] の要素数 NT は 19)。
+ただし t_len[3..5] について特別扱いされている。
+
+まず、t_len[] と c_len[x] の値の対応を以下に整理し直す。
+
+      t_len[0]  c_len[x]=0 1 つを 1 文字とみなす
+      t_len[1]  c_len[x]=0 が 3〜18 個連続している塊を 1 文字とみなす
+      t_len[2]  c_len[x]=0 が 20〜NC{510} 個連続している塊を 1 文字とみなす
+      t_len[3]  c_len[x]=1
+      t_len[4]  c_len[x]=2
+      t_len[5]  c_len[x]=3
+      t_len[6]  c_len[x]=4
+          :
+      t_len[18] c_len[x]=16
+
+t_len[3..5] の特別扱いについて考えると t_len[3..5] の範囲で 0 が連続す
+る場合に、2 ビットでそのことを表している。これはつまりこのような場合が
+多いのであろう。上で対応関係を示したとおり、t_len[3..5] が 0 である場合
+というのは、つまりビット長 c_len[x] が 1..3 の範囲の値を持たない場合を
+示す。
+
+# c_len[x] が 1..3 の値を持つ場合というのは Huffman 木においてある 3 文字
+# の出現頻度が極端に多い場合を示す。このような場合はあまりないであると想
+# 定しているのだろう。
+#
+#            .
+#           / \
+#          a   .
+#             / \
+#            b   .
+#               / \
+#              c   .
+#                 / \
+#                .   .
+#               / \ / \
+
+以上で LHA ファイルの構造についてひととおり説明したことになる。ただし、
+復号処理を考える場合に注意事項がある。これはこの後で説明しよう。
+
+
+セキュリティバグの考察
+----------------------
+
+2006年8月 LHA の復号処理にセキュリティバグ(CVE-2006-4335,4337,4338)が発
+見された。この問題は LHA の実装において符号化については当然あらゆる入力
+ファイルを想定した処理となっているが復号については圧縮ファイルが正しい
+構造、値で作成されていることしか想定せずに処理が作られていたためである。
+つまり、不正な圧縮ファイルが与えられた場合の動作が不定だったのだ。
+
+ここでは、LHA の復号において注意すべき点について考察する。また、ここま
+でに解読した LHa for UNIX ver.1.14i のソースはこのセキュリティバグが
+残っていたものなので、セキュリティバグの対策を行ったソースについても後
+で解析を行うこととする。
+
+以下、LHA の構造を再掲し、各復号処理で注意すべき点を確認しよう。
+以降の説明では注意点毎に (1) (2) のように番号を振っている。最終的に
+全チェックポイントをチェックするように修正したソースを載せ、この番号で
+紐付けを行うこととする。
+
+----------------------------------------------------------------------------
+< LHA ファイルの構造(1 ブロック分) >
+
+    +-----------+
+    | blocksize |
+    +-----------+
+       16bit
+
+ ハフマン木
+    +-----------+-----------+-----------+
+    | t_len     | c_len     | p_len     |
+    +-----------+-----------+-----------+
+
+ 圧縮文(文字と長さ、位置のビット長のハフマン符号と位置の値)
+    +---------------------+
+    |  圧縮文             |
+    +---------------------+
+
+----------------------------------------------------------------------------
+
+(1)
+blocksize の読み込みについてこの値は 1〜0xffff については正しいが 0 に
+なることはあり得ないので 0 の場合に不正と判断してもよいと思われる。
+
+(2)
+「圧縮文」自体については、blocksize 数を頼りに読み込むので blocksize を
+越えて圧縮文が存在しても次の block として読まれるだけである。blocksize
+に満たない場合は、EOF を検知して早期に不正と判断するように処理した方が
+よいだろう。
+
+圧縮文中の文字と長さについては
+
+    復号した1文字 >= 256 の場合
+      長さを示す。(そしてその直後に位置の Huffman 符号がある)
+
+    復号した1文字 < 256 の場合
+      文字を示す。
+
+であり、文字としては 0 .. 255 すべてについて正しい値なので問題はない。
+
+(3)
+長さは 256 ... NC{256+maxmatch-3+1} の範囲の値を取るのでこれを超える値
+を返す場合は不正と判断してもよい。ただし、この判定自体は c_len を読み込
+み Huffman 木を構築するときに行うこともできる。(実際、実装では
+Huffman 木にこの範囲内の復号語しか割り当てないのでバグでない限りは発生
+しないだろう)
+
+位置については下図の通り位置のビット長の Huffman 符号と位置の値が書かれ
+ている。
+
+          +------------------------------+----------+
+          | 位置のビット長の Huffman 符号| 位置の値 |
+          +------------------------------+----------+
+
+(4)
+位置の値としては 0 ... 2^dicbit の範囲の値を持つので Huffman 符号の復号
+結果が 0 ... np{dicbit+1} の範囲であれば位置の値部分についてチェックす
+る必要はない。従って、c_len と同じくハフマン木の構築の段階で不正な復号
+語を返さないようにしていればよい。
+
+では、t_len について見てみる。
+
+----------------------------------------------------------------------------
+< t_len[] の出力フォーマット >
+
+                                             2 bit
+   0      TBIT{5}                           |--|
+   +-------+----------+----------+----------+--+----------+-    -+-----------+
+   |   n   | t_len[0] | t_len[1] | t_len[2] | x|t_len[x+3]| ...  | t_len[n-1]|
+   +-------+----------+----------+----------+--+----------+-    -+-----------+
+
+t_len[i] <= 6 の場合
+
+              0     3bit
+              +-----+
+    t_len[i]  | | | |
+              +-----+
+
+t_len[i] >= 7 の場合
+
+              0             t_len[i] - 3
+              +----------------+
+    t_len[i]  |1 1 1 1 ... 1 0 |
+              +----------------+
+
+t_len[2] の直後は 2 bit の情報が付加される。この値を x{0..3} とすると、
+t_len[3 .. x+2] の範囲で 0 が続くことを意味し、この 2 bit 以降は、
+t_len[x+3] が続くことになる。x が 0 の場合は、t_len[3] は 0 ではない。
+
+t_len[n...NT] は、0 となる。
+
+----------------------------------------------------------------------------
+
+(5)
+t_len の出力フォーマットの先頭 TBIT{5} は 0 ... 2^5{32} の範囲の値を格
+納できるが t_len の領域サイズは NT{19} なので 0..19 の範囲を超える場合
+は不正と判断しなければならない。
+
+(6)
+また、t_len[i] >= 7 の場合の形式は bit 0 を検出するまでのビット長が値と
+なるが t_len[i] の値はハフマン符号長なので 0 .. 16 の範囲でなければなら
+ない。t_len[i] >= 7 の形式の具体的な値の対応は
+
+      7: 1110
+      8: 1111 0
+      :
+     15: 1111 1111 1110
+     16: 1111 1111 1111 0
+
+となっているので、16 の場合のビット長(1 が 12 bit 続く)よりビット長が長
+い場合は不正である。(最大 12 ビットまでしか見ないとすることも考えられるが、
+LHA の圧縮処理は上の例のように 16 の場合でもビット 0 を出力するので、そ
+のような読み方をすると正常な圧縮文を復号できなくなる。)
+
+(7)
+さらに、t_len を読み込んだ後に構築した Huffman 木は Huffman 木として整合
+性が保たれなければならない。
+たとえば、LHA における Huffman 木は以下の性質が守られなければならないは
+ずだ。
+
+   o t_len[x] <= 16 (LHA の Huffman 木の階層は 16 までである)
+
+   o 各階層の葉の数は整合性が保たれなければならない。例えば、1 階層目の
+     葉の数は最大 2 であり、このとき下位の階層の葉の数は 0 である。各節
+     は必ず節か葉を持つ。など。
+
+後で処理を解析する際にこの辺りを確認しよう。
+なお、1 点目については前述の通り t_len の読み込み時にチェックできる。
+2 点目については実装では非常にうまい方法でチェックしている。
+
+続いて c_len[] の出力フォーマットについて考える。
+
+----------------------------------------------------------------------------
+< c_len[] の出力フォーマット >
+
+             0       CBIT{9}
+             +-------+-----------+-----------+--   --+-----------+
+             |   n   |  c_len[0] |  c_len[1] | ...     c_len[n-1]|
+             +-------+-----------+-----------+--   --+-----------+
+
+c_len[i] == 0 の場合
+
+ 0 が続く数を count とすると、
+
+ count == 1 の場合
+
+                t_len[0]
+              <---------->
+             +------------+
+             |  t_code[0] |
+             +------------+
+
+ count == 2 の場合
+
+                t_len[0]     t_len[0]
+              <----------> <---------->
+             +------------+------------+
+             |  t_code[0] |  t_code[0] |
+             +------------+------------+
+
+ count == 3..18 の場合
+
+                t_len[1]    4 bit
+              <----------> <------>
+             +------------+-------+
+             |  t_code[1] |count-3|
+             +------------+-------+
+
+ count == 19 の場合
+
+                 t_len[0]    t_len[1]    4 bit
+              <----------> <----------> <------>
+             +------------+------------+-------+
+             |  t_code[0] |  t_code[1] |count-3|
+             +------------+------------+-------+
+
+  count >= 20 の場合
+
+                 t_len[2]    CBIT{9}
+              <----------> <------>
+             +------------+--------+
+             |  t_code[2] |count-20|
+             +------------+--------+
+
+c_len[i] > 0 の場合
+
+               t_len[c_len[i]+2]
+              <----------------->
+             +-------------------+
+             | t_code[c_len[i]+2]|
+             +-------------------+
+
+c_len[n...NC] は、0 となる。
+
+----------------------------------------------------------------------------
+
+(8)
+c_len の出力フォーマットの先頭 CBIT{9} は 0 ... 2^9(512) の範囲の値を
+格納できるが c_len の領域サイズは NC{510} なので 0..510 の範囲を超える
+場合は 不正と判断しなければならない。
+
+(9)
+また、
+ count >= 20 の場合
+ count == 3..18 の場合
+
+のそれぞれの形式において count の数だけ c_len[i] は 0 が続くがこれが
+c_len の*残り*サイズを越える場合も不正である。
+
+(10)
+さらに、c_len[i] > 0 の場合の形式において、t_len[x] を復号した結果が
+c_len[i]{x}+2 の値でありc_len[i] の値はハフマン符号長なので 0 .. 16 の
+範囲でなければならない。これは、c_len, p_len と同じく t_len のハフマン
+木の構築の段階で不正な復号語を返さないようにしていればよい。
+
+(11)
+もちろん、t_len のときと同様 c_len を読み込んだ後に構築した Huffman 木
+は Huffman 木として整合性が保たれなければならない。
+
+続いて p_len[] の出力フォーマットについて考える。
+
+----------------------------------------------------------------------------
+< p_len[] の出力フォーマット >
+
+             0      pbit{4 or 5}
+             +-------+-----------+-----------+--   --+-----------+
+             |   n   |  p_len[0] |  p_len[1] | ...     p_len[n-1]|
+             +-------+-----------+-----------+--   --+-----------+
+
+p_len[i] <= 6 の場合
+
+              0     3bit
+              +-----+
+    p_len[i]  | | | |
+              +-----+
+
+p_len[i] >= 7 の場合
+
+              0              p_len[i] - 3
+              +----------------+
+    p_len[i]  |1 1 1 1 ... 1 0 |
+              +----------------+
+
+p_len[n...np] は、0 となる。
+
+----------------------------------------------------------------------------
+
+(12)
+p_len の出力フォーマットの先頭 pbit{4 or 5} は 0 ... 2^4{16} or
+2^5{32} の範囲の値を格納できるが p_len の領域サイズは np{14..17} なので
+0..np の範囲を超える場合は不正と判断しなければならない。
+
+ところで復習になるが np は、各圧縮メソッドの辞書のサイズで決まる。対応
+を以下に再掲するので確認してほしい。(-lh4- の場合の np はなぜか 13 では
+なく14 となっている。おそらく、LHA が実装された当時 -lh6-, -lh7- は存在
+せず np や pbit は固定値(定数 NP, PBIT)であったため、-lh4-, -lh5- の両
+方に対応できるよう変数の領域サイズを合わせただけであると思う。つまり、
+圧縮処理においては、-lh4- の np を 13 と想定しても問題は発生しないと思
+われる。逆に復号処理においては、(gzip のように)圧縮 method の情報が渡さ
+れない場合は np を 14 とするしかない。なお、このような(gzip のような)
+場合 -lh6,7- への対応はできない。最初の pbit 分の要素数の読み込みで 4
+ビット読めばよいのか 5 ビット読めばよいのかがわからないからである)
+
+        method  maxmatch  dicsiz   dicbit   np(dicbit+1) pbit
+        -----------------------------------------------------------
+        -lh4-        256  2^12     12       14 (or 13?)  4 (14<2^4)
+        -lh5-        256  2^13     13       14           4 (14<2^4)
+        -lh6-        256  2^15     15       16           5 (16<2^5)
+        -lh7-        256  2^16     16       17           5 (17<2^5)
+
+(13)
+また、t_len と同様に、p_len[i] >= 7 の形式では、1 が 12 bit より多く連
+続した場合に不正である。
+
+(14)
+もちろん、p_len[] を読み込んだ後に構築した Huffman 木の整合性が保たれな
+ければならない点は他の Huffman 木と同じだ。
+
+では、実際に復号処理のセキュリティ対応を行ったソースを基に実装を確認しよう。
+
+
+以下は、
+
+    https://bugzilla.redhat.com/show_bug.cgi?id=204676
+
+にて掲載されたパッチある。このパッチは gzip 用のパッチであったが内容は
+ほとんど同じである。(gzip は LHA とほとんど同じ復号処理のソースを含んで
+おり、LHA の圧縮形式を復号することができる。ただ、LHA ヘッダを読むこと
+はできないため lzh ファイルを展開できるわけではない。見たところ
+-lh4,lh5- にのみ対応している。)
+
+diff -ru gzip-1.3.5.orig/unlzh.c gzip-1.3.5/unlzh.c
+--- gzip-1.3.5.orig/unlzh.c     1999-10-06 06:00:00.000000000 +0100
++++ gzip-1.3.5/unlzh.c  2006-08-18 22:56:19.446997000 +0100
+@@ -149,13 +149,17 @@
+     unsigned i, k, len, ch, jutbits, avail, nextcode, mask;
+
+     for (i = 1; i <= 16; i++) count[i] = 0;
+-    for (i = 0; i < (unsigned)nchar; i++) count[bitlen[i]]++;
++    for (i = 0; i < (unsigned)nchar; i++) {
++        if (bitlen[i] > 16)
++        error("Bad table (case a)\n");
++        else count[bitlen[i]]++;
++    }
+
+bitlen は、c_len, p_len, t_len であり、いずれの Huffman 木も最大の階層
+は 16 までであるからその範囲を超えたものがないかチェックしている。これ
+は、セキュリティバグの重要な改修点の１点目である。
+
+     start[1] = 0;
+     for (i = 1; i <= 16; i++)
+        start[i + 1] = start[i] + (count[i] << (16 - i));
+-    if ((start[17] & 0xffff) != 0)
+-       error("Bad table\n");
++    if ((start[17] & 0xffff) != 0 || tablebits > 16) /* 16 for weight below */
++       error("Bad table (case b)\n");
+
+     jutbits = 16 - tablebits;
+     for (i = 1; i <= (unsigned)tablebits; i++) {
+
+tablebits は、make_table() を呼び出すときに指定する引数で以下の通り固定
+値(8 or 12)である。従って必ずしも必要ではない。(あえてチェックするなら
+Bad table でなく Bug と表示するべきだろう)
+
+    make_table(nn, pt_len, 8, pt_table);
+    make_table(NC, c_len, 12, c_table);
+
+total & 0xffff はどの程度の不正テーブルを検出するのだろうか？
+該当の処理を以下に示そう。
+
+    for (i = 1; i <= 16; i++) count[i] = 0;
+    for (i = 0; i < (unsigned)nchar; i++) count[bitlen[i]]++;
+
+    start[1] = 0;
+    for (i = 1; i <= 16; i++)
+	start[i + 1] = start[i] + (count[i] << (16 - i));
+    if ((start[17] & 0xffff) != 0)
+	error("Bad table\n");
+
+これは、LHa for UNIX で以下のように書かれていた部分であり、ロジックとし
+てはまったく一緒である。
+
+    /* (A) */
+    avail = nchar;
+
+    /* initialize */
+    for (i = 1; i <= 16; i++) {
+        count[i] = 0;
+        weight[i] = 1 << (16 - i);
+    }
+
+    /* (B) */
+    /* count */
+    for (i = 0; i < nchar; i++)
+        count[bitlen[i]]++;
+
+    /* (C) */
+    /* calculate first code */
+    total = 0;
+    for (i = 1; i <= 16; i++) {
+        start[i] = total;
+        total += weight[i] * count[i];
+    }
+    if ((total & 0xffff) != 0)
+        error("make_table()", "Bad table (5)\n");
+
+例えば、以下の Huffman 木では各階層の重み weight の値(gzip のソースで、
+(16 - i)の値)は
+
+       /\
+      a /\              weight[1] = 0x8000
+        b c             weight[2] = 0x4000
+
+であり、葉の数に重みをかけた値の総和は
+
+0x10000
+
+となる。これは正しい Huffman 木について必ず成り立たなければならない必要
+十分条件である。
+
+しかし、既存の処理では例えば 1 階層目の葉の数が 4 である場合に total が
+0x20000 となり 0xffff との論理積では異常を検知できない。
+
+ここは、以下のようにするべきであろう(以下は、LHa for UNIXのソース)。
+
+    /* (C) */
+    /* calculate first code */
+    total = 0;
+    for (i = 1; i <= 16; i++) {
+        start[i] = total;
+        total += weight[i] * count[i];
+        if (total > 0x10000)
+            error("make_table()", "Bad table\n");
+    }
+    if (total != 0x10000)
+        error("make_table()", "Bad table (5)\n");
+
+ループの中に total のチェックを入れているのは念のためである。もちろん、
+total の変数のサイズは 16 bit では足りないので 32 bit 整数にする必要が
+ある。(gzip のソースでは、total 変数の代わりに start[17] が使われている
+ので、LHa for UNIX のように total 変数にするか、start[] 自体を 32 bit
+整数に変える必要がある。)
+
+なお、32 bit 整数にした場合でも、count[1] が 0x20000 の値以上であるとき
+total がオーバーフローする恐れがあるが以下の処理より count[] がnchar よ
+り大きくなることはない。
+
+    /* (B) */
+    /* count */
+    for (i = 0; i < nchar; i++)
+        count[bitlen[i]]++;
+
+そして、要素数が最も大きい c_len の場合で nchar は NC{510} であるから
+32 bit 整数の範囲をオーバーすることはないだろう。このことがはっきりして
+いればループ中に入れた
+
+        if (total > 0x10000)
+            error("make_table()", "Bad table (5)\n");
+
+は必ずしも必要ではない。あるいは、階層 n の葉の数が 2^n を越えないことの
+チェックに変えても良いだろう。
+
+    /* (C) */
+    /* calculate first code */
+    total = 0;
+    for (i = 1; i <= 16; i++) {
+        if (count[i] > (1<<i))
+            error("make_table()", "Bad table\n");
+        start[i] = total;
+        total += weight[i] * count[i];
+    }
+    if (total != 0x10000)
+        error("make_table()", "Bad table (5)\n");
+
+これならば、total は最大でも 16 * 0x10000 = 0x100000 にしかならないこと
+が保証される。
+
+@@ -169,15 +173,15 @@
+
+     i = start[tablebits + 1] >> jutbits;
+     if (i != 0) {
+-       k = 1 << tablebits;
+-       while (i != k) table[i++] = 0;
++       k = MIN(1 << tablebits, DIST_BUFSIZE);
++       while (i < k) table[i++] = 0;
+     }
+
+tablebits は固定値なので、必ずしもこのチェックは必要ではない。
+
+     avail = nchar;
+     mask = (unsigned) 1 << (15 - tablebits);
+     for (ch = 0; ch < (unsigned)nchar; ch++) {
+        if ((len = bitlen[ch]) == 0) continue;
+-       nextcode = start[len] + weight[len];
++       nextcode = MIN(start[len] + weight[len], DIST_BUFSIZE);
+        if (len <= (unsigned)tablebits) {
+            for (i = start[len]; i < nextcode; i++) table[i] = ch;
+        } else {
+
+DIST_BUFSIZE は、c_table[] のバッファサイズで 1<<12 である。nextcode は、
+LHa for UNIX での該当変数は l で、Huffman 符号の(先頭 tablebits ビット
+の)取り得る最大値である。これは、理論上
+
+             tablebits  最大の Huffman 符号    m
+    c_len    12         1111 1111 1111{4095}   4
+    p_len     8              1111 1111{255}    8
+    t_len     8              1111 1111{255}    8
+
+であり、ループ脱出条件が不正でない限り、このチェックは不要であると思わ
+れる。(そもそも、念のためという意味でチェックしているのなら c_len の場
+合だけしか考慮してないのも変である)
+
+ただし、先ほどの total チェックが不完全なままだと start[] の値が
+不正になりうるため、話が変わってくる。
+そういうわけで、これはセキュリティバグの重要な改修点の２点目となるが、
+本当は total のチェックの方が重要である。
+
+さらに、木の形が正しくても
+
+  復号語の種類数 < 葉の数
+
+である場合、葉に値が割り当てられない枝が発生してしまう。これもチェック
+しておいた方が良いだろう。復号語の数は nchar で葉の数は count[] の総和
+であるから
+
+    /* (B) */
+    /* count */
+    for (i = 0; i < nchar; i++)
+        count[bitlen[i]]++;
+
+より、このことは保証されているようだ(i >= nchar である bitlen[i] が設定
+されていても使われない。もちろん設定された時点で、エラーを検出する方が
+望ましいとは思う)
+
+@@ -218,7 +222,7 @@
+        for (i = 0; i < 256; i++) pt_table[i] = c;
+     } else {
+        i = 0;
+-       while (i < n) {
++       while (i < MIN(n,NPT)) {
+            c = bitbuf >> (BITBUFSIZ - 3);
+            if (c == 7) {
+                mask = (unsigned) 1 << (BITBUFSIZ - 1 - 3);
+
+n が t_len、p_len の領域の範囲内の値とは限らないのでそのチェックを行っ
+ている。これは、セキュリティバグの重要な改修点の３点目である。
+
+気になるのは、
+
+・p_len, t_len の論理的な領域サイズでなく実装上の pt_len の領域サイズで
+  チェックしている。そのため、バッファオーバーフローのセキュリティ対策
+  としては十分だがエラーチェックとしては不完全である(エラーの検出が遅延
+  される)。
+
+・不正な値をエラーとせず。処理を最大値で継続している。そのため、以下同文。
+
+@@ -228,7 +232,7 @@
+            pt_len[i++] = c;
+            if (i == i_special) {
+                c = getbits(2);
+-               while (--c >= 0) pt_len[i++] = 0;
++               while (--c >= 0 && i < NPT) pt_len[i++] = 0;
+            }
+        }
+        while (i < nn) pt_len[i++] = 0;
+
+i_special は 3 固定なので、このチェックは必ずしも必要というわけではない。
+(厳密には、実装上 i_special が -1 である場合があるが i が -1 になった時
+点でバグであり、その心配はなさそうだ)
+
+@@ -248,7 +252,7 @@
+        for (i = 0; i < 4096; i++) c_table[i] = c;
+     } else {
+        i = 0;
+-       while (i < n) {
++       while (i < MIN(n,NC)) {
+            c = pt_table[bitbuf >> (BITBUFSIZ - 8)];
+            if (c >= NT) {
+                mask = (unsigned) 1 << (BITBUFSIZ - 1 - 8);
+
+n が c_len の領域の範囲内の値とは限らないので、同上。
+
+@@ -256,14 +260,14 @@
+                    if (bitbuf & mask) c = right[c];
+                    else               c = left [c];
+                    mask >>= 1;
+-               } while (c >= NT);
++               } while (c >= NT && (mask || c != left[c]));
+            }
+
+このループ部分の全体はパッチ前だと、
+
+	    c = pt_table[bitbuf >> (BITBUFSIZ - 8)];
+	    if (c >= NT) {
+		mask = (unsigned) 1 << (BITBUFSIZ - 1 - 8);
+		do {
+		    if (bitbuf & mask) c = right[c];
+		    else               c = left [c];
+		    mask >>= 1;
+		} while (c >= NT);
+	    }
+	    fillbuf((int) pt_len[c]);
+
+となっており、
+
+  mask == 0 && c == left[c]
+
+の条件を満たしてしまうような不正な木が構築されていると c の値は変化せず
+いつまでもループし続けることになってしまう。そこで、この条件が発生した
+ときにすぐにループを脱出するようその条件の否定である
+
+  !(mask == 0 && c == left[c])
+
+つまりは、
+
+  (mask || c != left[c])
+
+をループ継続の while 条件に加えているようだ。しかし、mask の初期値は
+
+  1 << (BITBUFSIZ{16} - 1 - 8) {0000 0000 1000 0000}
+
+でありループ毎に
+
+  mask >>= 1;
+
+しているのだから、mask == 0 になった時点で、8 bit(最初の表引きと合わせ
+て 16 bit)の Huffman 符号を読み込んでおり(くどいかも知れないが LHA にお
+ける Huffman 木の階層は最大 16)、mask == 0 を脱出条件に加えるだけで良い
+と思う。
+
+もちろん、17 bit の符号を読み込んだ時点で不正なのだから
+
+		mask = (unsigned) 1 << (BITBUFSIZ - 1 - 8);
+		do {
+                    if (mask == 0) error("....");
+
+		    if (bitbuf & mask) c = right[c];
+		    else               c = left [c];
+		    mask >>= 1;
+		} while (c >= NT);
+
+と異常終了しても問題ないと思う。以下のように for で書くこともできるがま
+あ結局は同じことだ。(こうすると見やすいだろうか？と考えてみただけである
+が、特に効果はないようだ。)
+
+                for (mask = 1 <<(BITBUFSIZ-1-8); mask != 0; mask >>= 1) {
+                    if (bitbuf & mask) c = right[c];
+                    else               c = left[c];
+
+                    if (c < NT) break;
+                }
+                if (mask == 0) error(...);
+
+しかし c の値と left[], right[] の領域サイズとの比較は良いのだろうか？
+（理論上は Huffman 木の構築時にチェックされていれば問題ないので、私は問
+題ないと思うのだが、それを言うとそもそも無限ループのチェックも不要であ
+ると思う。)
+
+            fillbuf((int) pt_len[c]);
+            if (c <= 2) {
+                if      (c == 0) c = 1;
+                else if (c == 1) c = getbits(4) + 3;
+                else             c = getbits(CBIT) + 20;
+-               while (--c >= 0) c_len[i++] = 0;
++               while (--c >= 0 && i < NC) c_len[i++] = 0;
+            } else c_len[i++] = c - 2;
+        }
+        while (i < NC) c_len[i++] = 0;
+
+c_len[] の範囲外の領域に値が設定されないようチェックしている。しかし、
+やはりエラーとして検出せずに処理を続行している。
+
+@@ -292,7 +296,7 @@
+            if (bitbuf & mask) j = right[j];
+            else               j = left [j];
+            mask >>= 1;
+-       } while (j >= NC);
++       } while (j >= NC && (mask || j != left[j]));
+     }
+     fillbuf((int) c_len[j]);
+     return j;
+
+同上。
+
+@@ -309,7 +313,7 @@
+            if (bitbuf & mask) j = right[j];
+            else               j = left [j];
+            mask >>= 1;
+-       } while (j >= NP);
++       } while (j >= NP && (mask || j != left[j]));
+     }
+     fillbuf((int) pt_len[j]);
+     if (j != 0) j = ((unsigned) 1 << (j - 1)) + getbits((int) (j - 1));
+
+同上。
+
+@@ -356,7 +360,7 @@
+     while (--j >= 0) {
+        buffer[r] = buffer[i];
+        i = (i + 1) & (DICSIZ - 1);
+-       if (++r == count) return r;
++       if (++r >= count) return r;
+     }
+     for ( ; ; ) {
+        c = decode_c();
+@@ -366,14 +370,14 @@
+        }
+        if (c <= UCHAR_MAX) {
+            buffer[r] = c;
+-           if (++r == count) return r;
++           if (++r >= count) return r;
+        } else {
+            j = c - (UCHAR_MAX + 1 - THRESHOLD);
+            i = (r - decode_p() - 1) & (DICSIZ - 1);
+            while (--j >= 0) {
+                buffer[r] = buffer[i];
+                i = (i + 1) & (DICSIZ - 1);
+-               if (++r == count) return r;
++               if (++r >= count) return r;
+            }
+        }
+     }
+
+
+さて、これらセキュリティ対策は具体的にどのような場合を想定しているのだ
+ろう？
+
+https://bugzilla.redhat.com/show_bug.cgi?id=204676
+
+には、木の構築が不正になるシナリオとして以下が書かれている。
+
+>  * Construct a pt_len[] such that pt_len[n] is 0.
+>  * Construct a pt_table[] such that pt_table[(code buffer) >> 16 - 8]
+is n (where n>2)
+>  * Now c_len[] is filled with (n-2), generating exceptionally high values in
+>    count[n-2].
+
+しかし、これを読んでもよくわからなかったので一緒に掲載されていたサンプ
+ルの不正な符号を読んでみた。
+
+> perl -e 'print "\x1f\xa0","\xab\xcd","\xf6\x40\x01\xc2\xcc\x36\x0c\x92\x00\x00\x00\x00","\xc8","\x00"x"2048"' | gzip -d
+
+\x1f\xa0 はマジックナンバーで、gzip における LHA の圧縮形式を示す。そし
+て、LHA フォーマットは、\xab\xcd から始まる。これは、blocksize である。
+
+    blocksize = Oxabcd
+
+そして、t_len の出力形式が続く。2 進数と合わせて下記に示す。
+
+    f6        40        01        c2        cc        36
+    1111 0110 0100 0000 0000 0001 1100 0010 1100 1100 0011 0110
+    <---->
+    size of t_len
+
+    0c        92        00        00        00        00
+    0000 1100 1001 0010 0000 0000 0000 0000 0000 0000 0000 0000,
+
+    c8         00
+    1100 1000, 0000 * 2048
+
+いきなり、t_len のサイズが不正(1111 0=0x1e(30) > NT{19})である。そして、各
+t_len[] を読み込むと以下のようになる
+
+    t_len[ 0] = 110   :6
+    t_len[ 1] = 010   :2
+    t_len[ 2] = 0 00  :0
+                00
+    t_len[ 3] = 000   :0
+    t_len[ 4] = 0 00  :0
+    t_len[ 5] = 01 1  :3
+    t_len[ 6] = 100   :4
+    t_len[ 7] = 001   :1
+    t_len[ 8] = 0 11  :3
+    t_len[ 9] = 00 1  :1
+    t_len[10] = 100   :4
+    t_len[11] = 001   :1
+    t_len[12] = 1 01  :5
+    t_len[13] = 10 0  :4
+    t_len[14] = 000   :0
+    t_len[15] = 110   :6
+    t_len[16] = 0 10  :2
+    t_len[17] = 01 0  :2
+    t_len[18] = 010   :2
+    t_len[19] = 000   :0
+    t_len[20] = 0 00  :0
+    t_len[21] = 00 0  :0
+    t_len[22] = 000   :0
+    t_len[23] = 000   :0
+    t_len[24] = 0 00  :0
+    t_len[25] = 00 0  :0
+    t_len[26] = 000   :0
+    t_len[27] = 000   :0
+    t_len[28] = 0 00  :0
+    t_len[29] = 00, 1 :1
+
+この t_len から Huffman 木の階層の葉の数は、以下の通りとなり
+
+    count[1] = 3
+    count[2] = 4
+    count[3] = 2
+    count[4] = 3
+    count[5] = 1
+    count[6] = 2
+
+以下のような木の形になるので、不正である(図中 X は、count の値が不正な
+ために余計に出来た葉を示す)。
+
+                     .
+             /     /  \
+            X     .    .          - 1 階層目
+                 / \  / \
+                .   ..   .        - 2 階層目
+                        / \
+                       .   .
+                       \  / \
+                        X.   .
+                            / \
+                           .   .
+                              / \
+                             .   .  - 6 階層目
+
+結果的に、c_len[] はというとこちらは gzip のソースを修正して実際に値を
+出力させてみたところ以下の通りすべての値が 5 になった。これはやはり不正
+である。(階層 5 の葉の数が 288 個ある)
+
+    size of c_len: 100 1000, 0 0x120(288)
+
+    c_len[0] = 5
+    c_len[1] = 5
+      :
+    c_len[287] = 5
+
+
+ところで、本当はこうしたかったのではないだろうか？
+
+perl -e 'print "\x1f\xa0","\xab\xcd","\x9e\x40\x01\xc2\xcc\x36\x0c\x92","\xc8","\x00"x"2048"' | gzip -d
+
+これならば、t_len[] の領域サイズは超えないので、このチェックにはかから
+ない。
+
+    blocksize: 0xabcd
+
+    size of t_len: 0x13(19)
+
+    t_len[ 0]: 6
+    t_len[ 1]: 2
+    t_len[ 2]: 0
+    t_len[ 3]: 0
+    t_len[ 4]: 0
+    t_len[ 5]: 3
+    t_len[ 6]: 4
+    t_len[ 7]: 1
+    t_len[ 8]: 3
+    t_len[ 9]: 1
+    t_len[10]: 4
+    t_len[11]: 1
+    t_len[12]: 5
+    t_len[13]: 4
+    t_len[14]: 0
+    t_len[15]: 6
+    t_len[16]: 2
+    t_len[17]: 2
+    t_len[18]: 2
+
+そして、先ほどと同じ count[] の結果となり不正な木ができる。
+
+    count[1] = 3
+    count[2] = 4
+    count[3] = 2
+    count[4] = 3
+    count[5] = 1
+    count[6] = 2
+
+結果、c_len[] が不正となる。
+
+    size of c_len: 0x190 (400)
+
+    c_len[0] = 5
+    c_len[1] = 5
+      :
+
+結局、この問題は木の形の不正を検出できてないために発生している。調べて
+みたところ、この例では total が 0x30000 になるために、
+
+    (total & 0xffff) != 0
+
+で検出できていないようである。従って、先に示したとおり total を 32 bit
+変数にして、この条件を
+
+    (total != 0x10000)
+
+とすることで解決できるように思う。
+
+# ちなみに、この条件は「クラフトの不等式」を整数に変形したものであるらしい。
+# 階層 16 以下のハフマン木であれば、
+#
+#   total == 2^16(0x10000)
+#
+# は必ず成り立ち、また、
+#
+#   total < 2^16
+#
+# であれば、この木は冗長な符号を割り当てていることを示すそうだ。そして、
+#
+#   total > 2^16
+#
+# は、一意な復号ができないことを示す。
+
+念を押しておくが、セキュリティパッチが間違っているわけではない。セキュ
+リティパッチとしてはバッファオーバフローを防げば良いので単にそのための
+チェックを入れただけである。ただし、プログラマの立場としてはセキュリティ
+パッチは対症療法な修正でしかなく、根本的な問題点を解決していない場合が
+あるということを覚えておく必要がある。と思う。
+
+
+このセキュリティバグの報告を受けて、gzip としてどのように修正しているか
+を確認してみた。以下は、問題が発見された gzip-1.3.5 とその修正が行われ
+た gzip-1.3.6 との差分(unlzh.c のみ)である。
+
+--- gzip-1.3.5/unlzh.c	1999-10-06 14:00:00.000000000 +0900
++++ gzip-1.3.6/unlzh.c	2006-11-20 17:40:34.000000000 +0900
+@@ -4,7 +4,7 @@
+  */
+ 
+ #ifdef RCSID
+-static char rcsid[] = "$Id: unlzh.c,v 1.2 1993/06/24 10:59:01 jloup Exp $";
++static char rcsid[] = "$Id: unlzh.c,v 1.4 2006/11/20 08:40:34 eggert Exp $";
+ #endif
+ 
+ #include <config.h>
+@@ -69,11 +69,7 @@ local void make_table OF((int nchar, uch
+ #define NT (CODE_BIT + 3)
+ #define PBIT 4  /* smallest integer such that (1U << PBIT) > NP */
+ #define TBIT 5  /* smallest integer such that (1U << TBIT) > NT */
+-#if NT > NP
+-# define NPT NT
+-#else
+-# define NPT NP
+-#endif
++#define NPT (1 << TBIT)
+
+
+恐らく、NT を超える値が圧縮文に埋め込まれてもバッファオーバーフローしな
+いようにするために pt_len のバッファサイズを大きくしたのだろう(重要な改
+修点の３点目を別な方法で解決している。個人的にはこのような対処は好みで
+ない。意図がわかりにくいからだ)
+
+c_len の領域サイズ(NC)はというと、gzip では元々 c_len のバッファサイズ
+は NC よりも大きい(8192 or 16384)。どうやら他の変数を使い回ししているた
+めにこのようになっているようだ。
+
+ /* local ush left[2 * NC - 1]; */
+ /* local ush right[2 * NC - 1]; */
+@@ -155,7 +151,7 @@ local void make_table(nchar, bitlen, tab
+     for (i = 1; i <= 16; i++)
+ 	start[i + 1] = start[i] + (count[i] << (16 - i));
+     if ((start[17] & 0xffff) != 0)
+-	error("Bad table\n");
++      gzip_error ("Bad table\n");
+
+ここの判定(木の構築が正しいかどうか)は変えなかったようだ。
+
+     jutbits = 16 - tablebits;
+     for (i = 1; i <= (unsigned)tablebits; i++) {
+@@ -179,6 +175,8 @@ local void make_table(nchar, bitlen, tab
+ 	if ((len = bitlen[ch]) == 0) continue;
+ 	nextcode = start[len] + weight[len];
+ 	if (len <= (unsigned)tablebits) {
++	    if ((unsigned) 1 << tablebits < nextcode)
++	      gzip_error ("Bad table\n");
+ 	    for (i = start[len]; i < nextcode; i++) table[i] = ch;
+ 	} else {
+ 	    k = start[len];
+
+代わりに、table[] の領域範囲を超える符号が現れた場合にエラーになるよう
+にしている(重要な改修点の２点目。ちゃんと、c_len だけでなく、pt_len の
+場合もチェックされることになる)。
+
+@@ -223,6 +221,8 @@ local void read_pt_len(nn, nbit, i_speci
+ 	    if (c == 7) {
+ 		mask = (unsigned) 1 << (BITBUFSIZ - 1 - 3);
+ 		while (mask & bitbuf) {  mask >>= 1;  c++;  }
++		if (16 < c)
++		  gzip_error ("Bad table\n");
+ 	    }
+ 	    fillbuf((c < 7) ? 3 : c - 3);
+ 	    pt_len[i++] = c;
+
+p_len, t_len について Huffman 符号長より大きい値が復号語となる場合にエ
+ラーとしている。(重要な改修点の１点目)
+
+パッチでは、make_table() 内でチェックしていたところを実際に値を読み込む
+箇所に移したのだろう。そして、c_len の場合は、t_len の復号で木の構築
+チェックにてエラーが検出されなければ問題ないとみなしているのだろうと思
+う。
+
+どうやら方針としては最低限のチェックで済ませているらしい。さすがにアル
+ゴリズムを熟知した上での修正のように見えるが、これで良いのかいまひとつ
+確信が持てない。まあ、gzip についてはこれ以上は触れないでおこう。
+
+
+# Local Variables:
+# mode : indented-text
+# indent-tabs-mode: nil
+# End:

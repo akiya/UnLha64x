@@ -1,0 +1,90 @@
+# -*- shell-script -*-
+message testing to lh0, lh1, lh5, lh6 and lh7 method archive.
+$lha cz  test-tmp-m0.lzh test-a test-b test-c
+							check $? $LINENO
+$lha co  test-tmp-m1.lzh test-a test-b test-c
+							check $? $LINENO
+$lha co5 test-tmp-m5.lzh test-a test-b test-c
+							check $? $LINENO
+$lha co6 test-tmp-m6.lzh test-a test-b test-c
+							check $? $LINENO
+$lha co7 test-tmp-m7.lzh test-a test-b test-c
+							check $? $LINENO
+$lha v test-tmp-m0.lzh &&
+$lha v test-tmp-m1.lzh &&
+$lha v test-tmp-m5.lzh &&
+$lha v test-tmp-m6.lzh &&
+$lha v test-tmp-m7.lzh
+							check $? $LINENO
+$lha v test-tmp-m0.lzh | grep lh0
+							check $? $LINENO
+$lha v test-tmp-m1.lzh | grep lh1
+							check $? $LINENO
+$lha v test-tmp-m5.lzh | grep lh5
+							check $? $LINENO
+$lha v test-tmp-m6.lzh | grep lh6
+							check $? $LINENO
+$lha v test-tmp-m7.lzh | grep lh7
+							check $? $LINENO
+$lha xw=test-tmp-m0 test-tmp-m0.lzh
+							check $? $LINENO
+$lha xw=test-tmp-m1 test-tmp-m1.lzh
+							check $? $LINENO
+$lha xw=test-tmp-m5 test-tmp-m5.lzh
+							check $? $LINENO
+$lha xw=test-tmp-m6 test-tmp-m6.lzh
+							check $? $LINENO
+$lha xw=test-tmp-m7 test-tmp-m7.lzh
+							check $? $LINENO
+
+diff -r test-1 test-tmp-m0
+							check $? $LINENO
+diff -r test-1 test-tmp-m1
+							check $? $LINENO
+diff -r test-1 test-tmp-m5
+							check $? $LINENO
+diff -r test-1 test-tmp-m6
+							check $? $LINENO
+diff -r test-1 test-tmp-m7
+							check $? $LINENO
+
+$lha pq test-tmp-m0.lzh test-a | diff test-a -
+							check $? $LINENO
+$lha pq test-tmp-m1.lzh test-a | diff test-a -
+							check $? $LINENO
+$lha pq test-tmp-m5.lzh test-a | diff test-a -
+							check $? $LINENO
+$lha pq test-tmp-m6.lzh test-a | diff test-a -
+							check $? $LINENO
+$lha pq test-tmp-m7.lzh test-a | diff test-a -
+							check $? $LINENO
+
+cat test-[abc] > test-tmp-abc
+$lha pq test-tmp-m0.lzh | diff test-tmp-abc -
+							check $? $LINENO
+$lha pq test-tmp-m1.lzh | diff test-tmp-abc -
+							check $? $LINENO
+$lha pq test-tmp-m5.lzh | diff test-tmp-abc -
+							check $? $LINENO
+$lha pq test-tmp-m6.lzh | diff test-tmp-abc -
+							check $? $LINENO
+$lha pq test-tmp-m7.lzh | diff test-tmp-abc -
+							check $? $LINENO
+# empty file should be frozen with the -lh0- method.
+touch test-tmp-0byte
+							check $? $LINENO
+$lha c test-tmp-0byte.lzh test-tmp-0byte
+							check $? $LINENO
+$lha v test-tmp-0byte.lzh
+							check $? $LINENO
+$lha v test-tmp-0byte.lzh | grep lh0
+							check $? $LINENO
+# uncompressed file should be frozen with the -lh0- method.
+echo foobar > test-tmp-small
+							check $? $LINENO
+$lha c test-tmp-small.lzh test-tmp-small
+							check $? $LINENO
+$lha v test-tmp-small.lzh
+							check $? $LINENO
+$lha v test-tmp-small.lzh | grep lh0
+							check $? $LINENO

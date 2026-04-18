@@ -1,0 +1,73 @@
+# -*- shell-script -*-
+message testing to add/update files to archive.
+lv=0
+$lha a$lv test-tmp.lzh test-c
+							check $? $LINENO
+$lha a$lv test-tmp.lzh test-b
+							check $? $LINENO
+$lha u$lv test-tmp.lzh test-a
+							check $? $LINENO
+$lha xw=test-tmp test-tmp.lzh
+							check $? $LINENO
+diff -r test-1 test-tmp
+							check $? $LINENO
+(cd test-tmp
+
+ sleep 1
+ echo foo > test-a
+ echo bar > test-b
+ echo baz > test-c
+
+ # update with new files
+ $lha u$lv ../test-tmp.lzh test-[abc]
+)
+							check $? $LINENO
+
+# old files are in test-1 and in current directory
+# new files are in test-tmp
+$lha vv test-1.lzh
+							check $? $LINENO
+$lha vv test-tmp.lzh
+							check $? $LINENO
+
+$lha xw=test-tmp2 test-tmp.lzh
+							check $? $LINENO
+diff -r test-tmp test-tmp2
+							check $? $LINENO
+# no update with old files
+$lha u$lv test-tmp.lzh test-[abc]
+
+$lha xw=test-tmp3 test-tmp.lzh
+							check $? $LINENO
+diff -r test-tmp test-tmp3
+							check $? $LINENO
+# replace with old files
+$lha a$lv test-tmp.lzh test-[abc]
+
+$lha xw=test-tmp4 test-tmp.lzh
+							check $? $LINENO
+diff -r test-1 test-tmp4
+							check $? $LINENO
+# replace with new files
+(cd test-tmp &&
+ $lha a$lv ../test-tmp.lzh test-[abc]
+)
+
+$lha xw=test-tmp5 test-tmp.lzh
+							check $? $LINENO
+diff -r test-tmp test-tmp5
+							check $? $LINENO
+
+# keep old files and append one
+(cd test-tmp
+
+ sleep 1
+ echo qux > test-d
+
+ # keep old entries test-[abc] and append test-d
+ $lha u$lv ../test-tmp.lzh test-d
+)
+$lha xw=test-tmp6 test-tmp.lzh
+							check $? $LINENO
+diff -r test-tmp test-tmp6
+							check $? $LINENO

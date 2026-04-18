@@ -1,0 +1,40 @@
+# -*- shell-script -*-
+message testing the end of line conversion.
+
+# LF to CR LF in archive
+$lha ct test-tmp-crlf.lzh test-a test-b test-c
+							check $? $LINENO
+# no convert
+$lha xw=test-tmp-crlf test-tmp-crlf.lzh
+							check $? $LINENO
+# use GNU diff option --binary for DJGPP.
+case `$lha --version 2>&1` in
+*msdosdjgpp*)
+diff -r --binary test-1 test-tmp-crlf
+  ;;
+*)
+diff -r test-1 test-tmp-crlf
+  ;;
+esac
+test $? -ne 0
+							check $? $LINENO
+
+sed -e 's/$/X/' < test-a | tr 'X' '\015' | diff test-tmp-crlf/test-a -
+							check $? $LINENO
+sed -e 's/$/X/' < test-b | tr 'X' '\015' | diff test-tmp-crlf/test-b -
+							check $? $LINENO
+sed -e 's/$/X/' < test-c | tr 'X' '\015' | diff test-tmp-crlf/test-c -
+							check $? $LINENO
+# CR LF to LF
+$lha xtw=test-tmp-nl test-tmp-crlf.lzh
+							check $? $LINENO
+diff -r test-1 test-tmp-nl
+							check $? $LINENO
+# no convert
+$lha c test-tmp-nl.lzh test-a test-b test-c
+							check $? $LINENO
+# CR LF to LF (cannot convert)
+$lha xtw=test-tmp-nl2 test-tmp-nl.lzh
+							check $? $LINENO
+diff -r test-1 test-tmp-nl2
+							check $? $LINENO

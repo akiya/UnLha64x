@@ -1,0 +1,38 @@
+# -*- shell-script -*-
+message testing to delete files from archive.
+
+cp test-1.lzh test-tmp.lzh
+
+# do nothing
+$lha d test-tmp.lzh 2> test-stderr
+							check $? $LINENO
+test -s test-stderr
+							check $? $LINENO
+$lha d test-tmp.lzh test-a 2> test-stderr
+							check $? $LINENO
+test -s test-stderr
+							check $? $LINENO
+$lha xw=test-tmp test-tmp.lzh &&
+test ! -f test-tmp/test-a &&
+diff test-1/test-b test-tmp/test-b &&
+diff test-1/test-c test-tmp/test-c
+							check $? $LINENO
+rm -rf test-tmp
+							check $? $LINENO
+$lha d test-tmp.lzh test-b 2> test-stderr
+							check $? $LINENO
+test -s test-stderr
+							check $? $LINENO
+$lha xw=test-tmp test-tmp.lzh &&
+test ! -f test-tmp/test-a &&
+test ! -f test-tmp/test-b &&
+diff test-1/test-c test-tmp/test-c
+							check $? $LINENO
+rm -rf test-tmp
+							check $? $LINENO
+$lha d test-tmp.lzh test-c 2> test-stderr
+							check $? $LINENO
+test -s test-stderr
+							check $? $LINENO
+test ! -f test-tmp.lzh
+							check $? $LINENO

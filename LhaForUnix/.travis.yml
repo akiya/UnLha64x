@@ -1,0 +1,18 @@
+language: c
+
+os:
+  - linux
+  - osx
+
+compiler:
+  - gcc
+  - clang
+
+before_script:
+  - autoreconf -is
+
+script: "./configure && make check"
+
+notifications:
+  on_success: change
+  on_failure: change

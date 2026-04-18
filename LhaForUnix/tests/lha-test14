@@ -1,0 +1,74 @@
+# -*- shell-script -*-
+message testing to handle symbolic links
+
+ln -s test-a test-tmp-a &&
+ln -s test-b test-tmp-b &&
+ln -s test-c test-tmp-c
+							check $? $LINENO
+$lha c test-tmp-1.lzh test-tmp-[abc]
+							check $? $LINENO
+$lha v test-tmp-1.lzh
+							check $? $LINENO
+$lha xw=test-tmp-1 test-tmp-1.lzh 2> test-tmp-stderr
+							check $? $LINENO
+# LHa: Symbolic Link test-a -> test-tmp-1/test-tmp-a
+# LHa: Symbolic Link test-b -> test-tmp-1/test-tmp-b
+# LHa: Symbolic Link test-c -> test-tmp-1/test-tmp-c
+test -s test-tmp-stderr
+							check $? $LINENO
+test -L test-tmp-1/test-tmp-a &&
+test -L test-tmp-1/test-tmp-b &&
+test -L test-tmp-1/test-tmp-c
+							check $? $LINENO
+# symbolic link is broken
+test ! -f test-tmp-1/test-tmp-a &&
+test ! -f test-tmp-1/test-tmp-b &&
+test ! -f test-tmp-1/test-tmp-c
+							check $? $LINENO
+
+# symbolic link filename contains '|'
+case `$lha --version 2>&1` in
+*-pc-cygwin*|*-pc-mingw*)
+    #  On MS Windows, '|' is invalid character as filename.
+    ;;
+*)
+ln -s test-a test-tmp-\|foo
+							check $? $LINENO
+$lha c test-tmp-2.lzh test-tmp-\|foo 2> test-tmp-stderr
+test $? -ne 0
+							check $? $LINENO
+#LHa: Error: symlink name "test-tmp-|foo" contains '|' char. change it into '_'
+test -s test-tmp-stderr
+							check $? $LINENO
+# '|' was changed into '_'.
+$lha v test-tmp-2.lzh
+							check $? $LINENO
+$lha v test-tmp-2.lzh | grep -E 'test-tmp-_foo -> test-a'
+							check $? $LINENO
+$lha xw=test-tmp-2 test-tmp-2.lzh 2> test-tmp-stderr
+							check $? $LINENO
+test -s test-tmp-stderr
+							check $? $LINENO
+test -L test-tmp-2/test-tmp-_foo &&
+test ! -f test-tmp-1/test-tmp-_foo
+							check $? $LINENO
+# linked filename contains '|'
+touch test-tmp-\|bar &&
+ln -s test-tmp-\|bar test-tmp-foo
+							check $? $LINENO
+$lha c test-tmp-3.lzh test-tmp-foo
+							check $? $LINENO
+$lha v test-tmp-3.lzh
+							check $? $LINENO
+$lha v test-tmp-3.lzh | grep -E 'test-tmp-foo -> test-tmp-\|bar'
+							check $? $LINENO
+$lha xw=test-tmp-3 test-tmp-3.lzh 2> test-tmp-stderr
+							check $? $LINENO
+# LHa: Symbolic Link test-tmp-3/test-tmp-foo -> test-tmp-|bar
+test -s test-tmp-stderr
+							check $? $LINENO
+test -L test-tmp-3/test-tmp-foo &&
+test ! -f test-tmp-1/test-tmp-foo
+							check $? $LINENO
+;;
+esac
