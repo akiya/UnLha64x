@@ -208,10 +208,10 @@ has_argument_long(char *arg, struct option *longopts)
         return -1;
     }
     else {
-        int len = strlen(arg);
+        int len = (int)strlen(arg);
         char *p = strchr(arg, '=');
         if (p) {
-            len = p - arg;
+            len = (int)(p - arg);
         }
 
         switch (longopts[i].has_arg) {
@@ -229,8 +229,10 @@ has_argument_long(char *arg, struct option *longopts)
                 return 0;
         default:
             assert(0);
+            return -1;
         }
     }
+    return -1;
 }
 
 /*
@@ -266,7 +268,9 @@ has_argument(char *arg,
         break;
     default:
         assert(0);
+        return -1;
     }
+    return -1;
 }
 
 int
@@ -383,10 +387,10 @@ getopt_long(int argc, char **argv,
             return '?';
         }
         else {
-            int len = strlen(opt);
+            int len = (int)strlen(opt);
             char *p = strchr(opt, '=');
             if (p) {
-                len = p - opt;
+                len = (int)(p - opt);
             }
 
             switch (longopts[i].has_arg) {

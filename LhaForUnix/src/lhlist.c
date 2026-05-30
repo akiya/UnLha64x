@@ -22,15 +22,23 @@ static void
 print_size(off_t packed_size, off_t original_size)
 {
 #if SIZEOF_OFF_T == 8
-    if (verbose_listing)
-        printf("%7llu ", packed_size);
-
-    printf("%7llu ", original_size);
+    if (verbose_listing) {
+#ifdef _MSC_VER
+        printf("%7I64u ", (unsigned __int64)packed_size);
+#else
+        printf("%7llu ", (unsigned long long)packed_size);
+#endif
+    }
+#ifdef _MSC_VER
+    printf("%7I64u ", (unsigned __int64)original_size);
+#else
+    printf("%7llu ", (unsigned long long)original_size);
+#endif
 #else
     if (verbose_listing)
-        printf("%7lu ", packed_size);
+        printf("%7lu ", (unsigned long)packed_size);
 
-    printf("%7lu ", original_size);
+    printf("%7lu ", (unsigned long)original_size);
 #endif
     if (original_size == 0L)
         printf("******");
@@ -67,7 +75,7 @@ print_stamp(time_t t)
         printf("%04d-%02d-%02d %02d:%02d:%02d",
                p->tm_year+1900, p->tm_mon+1, p->tm_mday,
                p->tm_hour, p->tm_min, p->tm_sec);
-    else if (p->tm_year * 12 + p->tm_mon > threshold)
+    else if (p->tm_year * 12 + p->tm_mon > (int)threshold)
         printf("%.3s %2d %02d:%02d",
         &t_month[p->tm_mon * 3], p->tm_mday, p->tm_hour, p->tm_min);
     else
@@ -339,9 +347,9 @@ cmd_list()
         }
 
         if (afp != stdin)
-            fseeko(afp, hdr.packed_size, SEEK_CUR);
+            fseeko(afp, (off_t)hdr.packed_size, SEEK_CUR);
         else {
-            i = hdr.packed_size;
+            i = (int)hdr.packed_size;
             while (i--)
                 fgetc(afp);
         }

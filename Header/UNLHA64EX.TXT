@@ -1,0 +1,212 @@
+﻿=======================================================================
+      UnLha64  拡張全体進捗通知仕様ファイル (UNLHA64EX.TXT)
+=======================================================================
+
+                                               2026年5月25日 新規作成
+
+
+はじめに
+
+　このドキュメントでは、UnLha64 で独自に拡張された「全体進捗通知機能」に
+ついて説明します。この機能を使用することで、従来の個別ファイルごとの処理
+状況に加え、書庫全体の処理対象ファイル総数や合計サイズに対する処理済みの
+累積進捗をリアルタイムに取得することができます。
+
+　なお、本機能は付属の GUI テストツールである `UnLha64Test` で実際に使用
+されており、個別ファイルと書庫全体の2本のプログレスバーによるリアルタイム
+な進捗表示を実現しています。
+
+　この機能を利用するためには、C/C++ プログラムにおいて `UNLHA64EX.H` を
+インクルードした上で、以下の API およびメッセージを使用してください。
+
+-----------------------------------------------------------------------
+%1. 各 API の説明
+%2. 拡張ウィンドウズメッセージ "wm_arcextract_ex"
+%3. ARCHIVERPROC の定義（拡張）
+%4. EXTRACTINGINFO_TOTAL の構造
+%5. 処理の流れ（事前スキャンと全体進捗）
+-----------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------
+%1. 各 API の説明
+-----------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+BOOL WINAPI UnlhaSetOwnerWindowExTotal(
+		const HWND      _hwnd,
+		LPARCHIVERPROC  _lpArcProc,
+		const BOOL      _bEnableTotalProgress
+	    )
+-----------------------------------------------------------------------
+要求版	1.0.0
+機能
+	UnLha64 の展開・圧縮等の処理状況を受け取るためのオーナーウィンドウ
+	またはコールバック関数の指定を行います。
+	_bEnableTotalProgress に TRUE を指定することで、事前スキャンおよび
+	"wm_arcextract_ex" メッセージによる、書庫全体の合計進捗状況を含んだ
+	拡張通知が有効になります。
+
+引数
+	_hwnd			メッセージを受け取るウィンドウのハンドル。
+				_lpArcProc に NULL を指定した場合は、この
+				ウィンドウに wm_arcextract_ex メッセージが
+				送出されます。
+	_lpArcProc		情報を受け取るためのコールバック関数へのポインタ。
+				詳細は後述の「%3. ARCHIVERPROC の定義」を
+				参照してください。
+	_bEnableTotalProgress	全体進捗通知の有効化フラグ。
+				TRUE を指定すると、処理の開始前に事前スキャンが
+				行われ、全体進捗情報を含む wm_arcextract_ex
+				メッセージが通知されるようになります。
+				FALSE の場合は従来の UnlhaSetOwnerWindowEx() と
+				同等の動作（個別ファイルの進捗のみ）となります。
+
+戻り値
+	正常終了時	TRUE を返します。
+	エラー時	動作中で変更できなかった場合や、既に他のオーナーウィンドウ
+				API で設定されている場合には FALSE を返します。
+				実際のエラーコードを得るには UnlhaGetLastError()
+				API を使用してください。
+
+
+-----------------------------------------------------------------------
+%2. 拡張ウィンドウズメッセージ "wm_arcextract_ex"
+-----------------------------------------------------------------------
+
+●wm_arcextract_ex
+
+　wm_arcextract_ex メッセージは、UnlhaSetOwnerWindowExTotal() にて
+_bEnableTotalProgress = TRUE を指定して設定した場合に送信されます。
+このメッセージを受け取ることで、処理中の個別ファイルの進捗だけでなく、
+書庫全体の合計サイズや処理済みサイズ、合計ファイル数や処理済みファイル数
+をリアルタイムに得ることができます。
+
+　wm_arcextract_ex メッセージは、RegisterWindowMessage("wm_arcextract_ex")
+によりシステムへの登録を行った上で使用するようにしてください。
+
+-----------------------------------------------------------------------
+LRESULT CALLBACK WindowProc(
+		HWND	_hwnd,
+		UINT	_uMsg,	    // wm_arcextract_ex
+		WPARAM	_wParam,
+		LPARAM	_lParam
+	    )
+-----------------------------------------------------------------------
+
+引数
+	wParam		(int)nMode
+			通知モード。UnLha64 の処理の状態を以下の数値で表します。
+
+			0 : 該当ファイルの処理を開始することを表します。
+			    (ARCEXTRACT_EX_BEGIN)
+			1 : 該当ファイルの処理中であることを表します。
+			    (ARCEXTRACT_EX_INPROCESS)
+			2 : 該当ファイルの処理が終了し、lpEisT のメモリーを
+			    開放しようとしていることを表します。
+			    (ARCEXTRACT_EX_END)
+			3 : 書庫全体の処理の開始（事前スキャンの開始など）を
+			    表します。 szSourceFileName に書庫名が格納されます。
+			    (ARCEXTRACT_EX_OPEN)
+			4 : 書庫全体の処理の終了を表します。
+			    (ARCEXTRACT_EX_CLOSE)
+
+	lParam		(EXTRACTINGINFO_TOTAL *)lpEisT
+			書庫全体の合計進捗情報および個別ファイル情報が格納されている
+			EXTRACTINGINFO_TOTAL 構造体へのポインタです。
+
+戻り値
+	0		UnLha64 に処理の継続を指示します。
+	0 以外		UnLha64 に処理を中止させます。
+
+
+-----------------------------------------------------------------------
+%3. ARCHIVERPROC の定義（拡張）
+-----------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+BOOL CALLBACK ARCHIVERPROC(
+			  HWND	  _hwnd,
+			  UINT	  _uMsg,
+			  UINT	  _nState,
+			  LPVOID  _lpEis
+		      );
+-----------------------------------------------------------------------
+
+引数
+	_hwnd		UnlhaSetOwnerWindowExTotal で指定したウィンドウハンド
+			ルが渡されます。
+	_uMsg		"wm_arcextract_ex" メッセージが渡されます。
+	_nState 	"wm_arcextract_ex" の wParam、つまり nMode が格納され
+			ます。
+	_lpEis		構造体へのポインタです。
+			UnlhaSetOwnerWindowExTotal() を使用し、且つ
+			_bEnableTotalProgress = TRUE を指定した場合は、
+			LPEXTRACTINGINFO_TOTAL 型の構造体へのポインタが
+			渡されます。
+
+戻り値
+	TRUE		UnLha64 に処理の継続を指示します。
+	FALSE		UnLha64 に処理を中止させます。
+
+
+-----------------------------------------------------------------------
+%4. EXTRACTINGINFO_TOTAL の構造
+-----------------------------------------------------------------------
+構造体定義
+		typedef struct {
+			DWORD        dwStructSize;
+			ULHA_INT64   llFileSize;
+			ULHA_INT64   llWriteSize;
+			ULHA_INT64   llTotalBytes;
+			ULHA_INT64   llTotalProcessed;
+			DWORD        dwTotalFiles;
+			DWORD        dwFilesProcessed;
+			WCHAR        szSourceFileName[FNAME_MAX32 + 1];
+			WCHAR        szDestFileName[FNAME_MAX32 + 1];
+		} EXTRACTINGINFO_TOTAL;
+
+メンバーの説明
+	dwStructSize		構造体のサイズ（sizeof(EXTRACTINGINFO_TOTAL)）。
+				将来の拡張時における互換性のために使用されます。
+	llFileSize		処理中個別ファイルの元のサイズ（バイト単位）。
+	llWriteSize		処理中個別ファイルの書き込み（展開時）または
+				読み込み（圧縮時）済みのサイズ（バイト単位）。
+	llTotalBytes		処理対象となる全ファイルの合計サイズ。
+				処理の開始前に事前スキャンを行って算出された
+				値が格納されます。
+	llTotalProcessed	処理済みの全ファイルの累積処理サイズ。
+				（処理済みファイルのサイズ合計 ＋ 現在処理中の
+				ファイルの llWriteSize）
+	dwTotalFiles		処理対象となる全ファイル数（事前スキャン値）。
+	dwFilesProcessed	すでに処理が完了したファイル数。
+	szSourceFileName	処理を行う格納ファイル名 (Unicode WCHAR)。
+	szDestFileName		実際に書き込まれるパス名 (Unicode WCHAR)。
+
+
+------------------------------------------------------------------------
+%5. 処理の流れ（事前スキャンと全体進捗）
+------------------------------------------------------------------------
+
+UnlhaSetOwnerWindowExTotal() にて _bEnableTotalProgress = TRUE を指定した
+場合の処理の流れは以下のようになります。
+
+１．書庫処理の開始前に、UnLha64 内部で「事前スキャン（Pre-scan）」が自動的に
+    行われ、処理対象ファイルの総数および合計サイズが算出されます。
+
+２．nMode = 3 (ARCEXTRACT_EX_OPEN) でメッセージを送出。
+    書庫全体の処理の開始を通知します。このとき、構造体の llTotalBytes および
+    dwTotalFiles に事前スキャンで得られた全体情報が格納されます。
+
+３．各ファイルごとの処理ループ：
+    A. 該当ファイルの処理開始時に nMode = 0 (ARCEXTRACT_EX_BEGIN) を送出。
+    B. 該当ファイルの処理中（展開・圧縮の書き込み中）に、一定サイズ処理するごとに
+       nMode = 1 (ARCEXTRACT_EX_INPROCESS) を送出。
+       - llWriteSize に該当ファイルの現在処理済みサイズが格納されます。
+       - llTotalProcessed に全体の累積処理済みサイズが格納されます。
+       - dwFilesProcessed には、その時点で処理完了しているファイル数が格納されます。
+    C. 該当ファイルの処理完了時に nMode = 2 (ARCEXTRACT_EX_END) を送出。
+
+４．すべての処理が完了した時点で、nMode = 4 (ARCEXTRACT_EX_CLOSE) を送出。
+
+=======================================================================

@@ -35,24 +35,24 @@ static unsigned int *prev;      /* previous posiion associated with hash */
            ^ text[(pos) + 2]         ) & (unsigned)(HSHSIZ - 1);
 
 static struct encode_option encode_define[2] = {
-#if defined(__STDC__) || defined(AIX)
+#if defined(__STDC__) || defined(AIX) || defined(_MSC_VER)
     /* lh1 */
-    { output_dyn,
-     (void (*) ()) encode_start_fix,
-     (void (*) ()) encode_end_dyn},
+    { (void (*) (void)) output_dyn,
+     (void (*) (void)) encode_start_fix,
+     (void (*) (void)) encode_end_dyn},
     /* lh4, 5, 6, 7 */
-    { output_st1,
-     (void (*) ()) encode_start_st1,
-     (void (*) ()) encode_end_st1}
+    { (void (*) (void)) output_st1,
+     (void (*) (void)) encode_start_st1,
+     (void (*) (void)) encode_end_st1}
 #else
     /* lh1 */
-    {(int (*) ()) output_dyn,
-     (int (*) ()) encode_start_fix,
-     (int (*) ()) encode_end_dyn},
+    {(void (*) (void)) output_dyn,
+     (void (*) (void)) encode_start_fix,
+     (void (*) (void)) encode_end_dyn},
     /* lh4, 5, 6, 7 */
-    {(int (*) ()) output_st1,
-     (int (*) ()) encode_start_st1,
-     (int (*) ()) encode_end_st1}
+    {(void (*) (void)) output_st1,
+     (void (*) (void)) encode_start_st1,
+     (void (*) (void)) encode_end_st1}
 #endif
 };
 
@@ -212,7 +212,7 @@ search_dict_1(unsigned int token, unsigned int pos, unsigned int off,
                 for (len = 0; len < max && *a++ == *b++; len++);
             }
 
-            if (len > m->len) {
+            if (len > (unsigned int)m->len) {
                 m->off = pos - scan_beg;
                 m->len = len;
                 if (m->len == max)
@@ -252,7 +252,7 @@ search_dict(unsigned int token,  /* search token */
     m->len = min;
 
     off = 0;
-    for (tok = token; hash[tok].too_flag && off < maxmatch - THRESHOLD; ) {
+    for (tok = token; hash[tok].too_flag && off < (unsigned int)(maxmatch - THRESHOLD); ) {
         /* If matching position is too many, The search key is
            changed into following token from `off' (for speed). */
         ++off;
@@ -265,11 +265,11 @@ search_dict(unsigned int token,  /* search token */
 
     search_dict_1(tok, pos, off, max, m);
 
-    if (off > 0 && m->len < off + 3)
+    if (off > 0 && (unsigned int)m->len < off + 3)
         /* re-search */
         search_dict_1(token, pos, 0, off+2, m);
 
-    if (m->len > remainder) m->len = remainder;
+    if ((unsigned int)m->len > remainder) m->len = (int)remainder;
 }
 
 /* slide dictionary */
@@ -287,7 +287,7 @@ next_token(unsigned int *token, unsigned int *pos, unsigned int *crc)
 }
 
 unsigned int
-encode(struct interfacing *interface)
+encode(struct interfacing *iface)
 {
     unsigned int token, pos, crc;
     off_t count;
@@ -298,9 +298,9 @@ encode(struct interfacing *interface)
         fout = xfopen("en", "wt");
     fprintf(fout, "[filename: %s]\n", reading_filename);
 #endif
-    infile = interface->infile;
-    outfile = interface->outfile;
-    origsize = interface->original;
+    infile = iface->infile;
+    outfile = iface->outfile;
+    origsize = iface->original;
     compsize = count = 0L;
     unpackable = 0;
 
@@ -322,6 +322,7 @@ encode(struct interfacing *interface)
     insert_hash(token, pos);     /* associate token and pos */
 
     while (remainder > 0 && ! unpackable) {
+        if (Lha_CheckAbort()) fatal_error("User cancelled.");
         last = match;
 
         next_token(&token, &pos, &crc);
@@ -369,14 +370,14 @@ encode(struct interfacing *interface)
     }
     encode_set.encode_end();
 
-    interface->packed = compsize;
-    interface->original = count;
+    iface->packed = compsize;
+    iface->original = count;
 
     return crc;
 }
 
 unsigned int
-decode(struct interfacing *interface)
+decode(struct interfacing *iface)
 {
     unsigned int i, c;
     unsigned int dicsiz1, adjust;
@@ -388,12 +389,12 @@ decode(struct interfacing *interface)
     fprintf(fout, "[filename: %s]\n", writing_filename);
 #endif
 
-    infile = interface->infile;
-    outfile = interface->outfile;
-    dicbit = interface->dicbit;
-    origsize = interface->original;
-    compsize = interface->packed;
-    decode_set = decode_define[interface->method - 1];
+    infile = iface->infile;
+    outfile = iface->outfile;
+    dicbit = iface->dicbit;
+    origsize = iface->original;
+    compsize = iface->packed;
+    decode_set = decode_define[iface->method - 1];
 
     INITIALIZE_CRC(crc);
     dicsiz = 1L << dicbit;
@@ -415,12 +416,13 @@ decode(struct interfacing *interface)
     decode_set.decode_start();
     dicsiz1 = dicsiz - 1;
     adjust = 256 - THRESHOLD;
-    if ((interface->method == LARC_METHOD_NUM) || (interface->method == PMARC2_METHOD_NUM))
+    if ((iface->method == LARC_METHOD_NUM) || (iface->method == PMARC2_METHOD_NUM))
         adjust = 256 - 2;
 
     decode_count = 0;
     loc = 0;
     while (decode_count < origsize) {
+        if (Lha_CheckAbort()) fatal_error("User cancelled.");
         c = decode_set.decode_c();
         if (c < 256) {
             if (dump_lzss) {
@@ -457,7 +459,7 @@ decode(struct interfacing *interface)
             }
 
             decode_count += match.len;
-            for (i = 0; i < match.len; i++) {
+            for (i = 0; i < (unsigned int)match.len; i++) {
                 c = dtext[(matchpos + i) & dicsiz1];
                 /*
                 if (dump_lzss) {
@@ -483,8 +485,8 @@ decode(struct interfacing *interface)
 
     free(dtext);
 
-    /* usually read size is interface->packed */
-    interface->read_size = interface->packed - compsize;
+    /* usually read size is iface->packed */
+    iface->read_size = iface->packed - compsize;
 
     return crc;
 }

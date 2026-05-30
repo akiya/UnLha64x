@@ -13,23 +13,23 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{185FC4D1-ED02-4BDE-BE52-0C0491931842}</ProjectGuid>
-    <RootNamespace>UnLhaCore</RootNamespace>
+    <ProjectGuid>{C2D3E4F5-A6B7-4321-9876-0C1B2A3D4E5F}</ProjectGuid>
+    <RootNamespace>UnLha64Test</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
+    <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
+    <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -55,14 +55,16 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_LIB;HAVE_CONFIG_H;LHA_LIBRARY;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>..\..\LhaForUnix\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>..\..\Header;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <ResourceCompile>
+      <AdditionalOptions>/c65001 %(AdditionalOptions)</AdditionalOptions>
+    </ResourceCompile>
     <Link>
-      <SubSystem>
-      </SubSystem>
+      <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -72,58 +74,32 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_LIB;HAVE_CONFIG_H;LHA_LIBRARY;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>..\..\LhaForUnix\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/FS /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>..\..\Header;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <ResourceCompile>
+      <AdditionalOptions>/c65001 %(AdditionalOptions)</AdditionalOptions>
+    </ResourceCompile>
     <Link>
-      <SubSystem>
-      </SubSystem>
+      <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\LhaForUnix\src\bitio.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\crcio.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\dhuf.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\huf.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\larc.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\maketbl.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\maketree.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\makezero.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\pm2.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\pm2hist.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\pm2tree.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\shuf.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\slide.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\header.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\lhadd.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\lhext.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\lhlist.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\lharc.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\util.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\support_utf8.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\patmatch.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\fnmatch.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\vars.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\callback.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\append.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\extract.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\indicator.c" />
-    <ClCompile Include="..\..\LhaForUnix\src\getopt_long.c" />
+    <ClCompile Include="UnLha64Test.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\LhaForUnix\src\config.h" />
-    <ClInclude Include="..\..\LhaForUnix\src\fnmatch.h" />
-    <ClInclude Include="..\..\LhaForUnix\src\lha.h" />
-    <ClInclude Include="..\..\LhaForUnix\src\lha_macro.h" />
-    <ClInclude Include="..\..\LhaForUnix\src\lhdir.h" />
-    <ClInclude Include="..\..\LhaForUnix\src\prototypes.h" />
+    <ResourceCompile Include="Resource.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="resource.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
+

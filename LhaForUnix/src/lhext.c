@@ -51,28 +51,8 @@ inquire_extract(char *name)
             return FALSE;
         }
         else if (!force) {
-            if (!isatty(0)) {
-                warning("skip to extract %s.", name);
-                return FALSE;
-            }
-
-            switch (inquire("OverWrite ?(Yes/[No]/All/Skip)", name, "YyNnAaSs\n")) {
-            case 0:
-            case 1:/* Y/y */
-                break;
-            case 2:
-            case 3:/* N/n */
-            case 8:/* Return */
-                return FALSE;
-            case 4:
-            case 5:/* A/a */
-                force = TRUE;
-                break;
-            case 6:
-            case 7:/* S/s */
-                skip_flg = TRUE;
-                break;
-            }
+            fatal_error("同名ファイルがあるので書き込めません。\n%s\n", name);
+            return FALSE;
         }
     }
 
@@ -86,16 +66,18 @@ static boolean
 make_name_with_pathcheck(char *name, size_t namesz, const char *q)
 {
     int offset = 0;
-    const char *p;
     int sz;
+#ifdef S_IFLNK
+    const char *p;
     struct stat stbuf;
+#endif
 
     if (extract_directory) {
         sz = xsnprintf(name, namesz, "%s/", extract_directory);
         if (sz == -1) {
             return FALSE;
         }
-        offset += sz;
+        offset = sz;
     }
 
 #ifdef S_IFLNK
@@ -198,14 +180,14 @@ open_with_make_path(char *name)
 static int
 symlink_with_make_path(const char *realname, const char *name)
 {
-    int l_code;
-
+    int l_code = -1;
+#ifdef S_IFLNK
     l_code = symlink(realname, name);
     if (l_code < 0) {
         make_parent_path(name);
         l_code = symlink(realname, name);
     }
-
+#endif
     return l_code;
 }
 
@@ -279,6 +261,7 @@ static off_t
 extract_one(FILE *afp,  /* archive file */
             LzHeader *hdr)
 {
+    g_infp = afp;
     FILE           *fp; /* output file */
 #if HAVE_LIBAPPLEFILE
     FILE           *tfp; /* temporary output file */
@@ -453,6 +436,7 @@ extract_one(FILE *afp,  /* archive file */
             remove_extracting_file_when_interrupt = TRUE;
 
             if ((fp = open_with_make_path(name)) != NULL) {
+                g_outfp = fp;
 #if HAVE_LIBAPPLEFILE
                 if (hdr->extend_type == EXTEND_MACOS && !verify_mode && decode_macbinary_contents) {
                     /* build temporary file */
@@ -482,9 +466,11 @@ extract_one(FILE *afp,  /* archive file */
                                    hdr->original_size, hdr->packed_size,
                                    name, method, &read_size);
 #endif /* HAVE_LIBAPPLEFILE */
+                g_outfp = NULL;
                 fclose(fp);
             }
             remove_extracting_file_when_interrupt = FALSE;
+            g_infp = NULL;
             signal(SIGINT, SIG_DFL);
 #ifdef SIGHUP
             signal(SIGHUP, SIG_DFL);
@@ -508,7 +494,9 @@ extract_one(FILE *afp,  /* archive file */
             }
             /* NAME has trailing SLASH '/', (^_^) */
             if ((hdr->unix_mode & UNIX_FILE_TYPEMASK) == UNIX_FILE_SYMLINK) {
+#ifdef S_IFLNK
                 int             l_code;
+#endif
 
 #ifdef S_IFLNK
                 if (skip_flg == FALSE)  {
@@ -588,6 +576,9 @@ skip_to_nextpos(FILE *fp, off_t pos, off_t off, off_t read_size)
 /* ------------------------------------------------------------------------ */
 /* EXTRACT COMMAND MAIN                                                     */
 /* ------------------------------------------------------------------------ */
+extern int Lha_GetEnableTotalProgress();
+extern void Lha_SetTotalProgressInfo(__int64 total_bytes, int total_files);
+
 void
 cmd_extract()
 {
@@ -600,10 +591,41 @@ cmd_extract()
     if ((afp = open_old_archive()) == NULL)
         fatal_error("Cannot open archive file \"%s\"", archive_name);
 
+    /* 拡張全体進捗のための事前スキャン */
+    if (Lha_GetEnableTotalProgress()) {
+        __int64 total_bytes = 0;
+        int total_files = 0;
+
+        if (archive_is_msdos_sfx1(archive_name))
+            seek_lha_header(afp);
+
+        while (get_header(afp, &hdr)) {
+            pos = ftello(afp);
+            if (need_file(hdr.name)) {
+                /* ディレクトリ、シンボリックリンク等はサイズに含めない */
+                if ((hdr.unix_mode & UNIX_FILE_TYPEMASK) == UNIX_FILE_REGULAR || 
+                    (hdr.unix_mode & UNIX_FILE_TYPEMASK) == 0) { /* 0は通常ファイル (OS依存等) */
+                    total_bytes += hdr.original_size;
+                    total_files++;
+                }
+            }
+            if (skip_to_nextpos(afp, pos, hdr.packed_size, 0) == -1) {
+                fatal_error("Cannot seek to next header position from \"%s\"", hdr.name);
+            }
+        }
+
+        /* ファイルポインタを先頭に戻す */
+        fseeko(afp, 0, SEEK_SET);
+
+        /* 情報をセット */
+        Lha_SetTotalProgressInfo(total_bytes, total_files);
+    }
+
     if (archive_is_msdos_sfx1(archive_name))
         seek_lha_header(afp);
 
     /* extract each files */
+
     while (get_header(afp, &hdr)) {
         pos = ftello(afp);
         if (need_file(hdr.name)) {
@@ -624,6 +646,7 @@ cmd_extract()
 
     /* close archive file */
     fclose(afp);
+    g_infp = NULL;
 
     /* adjust directory information */
     adjust_dirinfo();
@@ -637,6 +660,8 @@ is_directory_traversal(char *path)
     int state = 0;
 
     for (; *path; path++) {
+        /* スラッシュとバックスラッシュの両方をパス区切り文字として扱う */
+        int is_sep = (*path == '/' || *path == '\\');
         switch (state) {
         case 0:
             if (*path == '.') state = 1;
@@ -644,15 +669,15 @@ is_directory_traversal(char *path)
             break;
         case 1:
             if (*path == '.') state = 2;
-            else if (*path == '/') state = 0;
+            else if (is_sep) state = 0;
             else state = 3;
             break;
         case 2:
-            if (*path == '/') return 1;
+            if (is_sep) return 1;   /* ../または..\を検出 */
             else state = 3;
             break;
         case 3:
-            if (*path == '/') state = 0;
+            if (is_sep) state = 0;
             break;
         }
     }

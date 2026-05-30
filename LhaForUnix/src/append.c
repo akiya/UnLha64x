@@ -15,7 +15,7 @@ encode_lzhuf(FILE *infp, FILE *outfp,
 {
     static int method = -1;
     unsigned int crc;
-    struct interfacing interface;
+    struct interfacing iface;
 
     if (method < 0) {
         method = compress_method;
@@ -23,22 +23,23 @@ encode_lzhuf(FILE *infp, FILE *outfp,
             method = encode_alloc(method);
     }
 
-    interface.method = method;
+    iface.method = method;
 
-    if (interface.method > 0) {
-        interface.infile = infp;
-        interface.outfile = outfp;
-        interface.original = size;
+    if (iface.method > 0) {
+        iface.infile = infp;
+        iface.outfile = outfp;
+        iface.original = size;
         start_indicator(name, size, "Freezing", 1 << dicbit);
-        crc = encode(&interface);
-        *packed_size_var = interface.packed;
-        *original_size_var = interface.original;
+        crc = encode(&iface);
+        *packed_size_var = iface.packed;
+        *original_size_var = iface.original;
     } else {
+        start_indicator(name, size, "Storing ", 2048);
         *packed_size_var = *original_size_var =
             copyfile(infp, outfp, size, 0, &crc);
     }
     memcpy(hdr_method, "-lh -", 5);
-    hdr_method[3] = interface.method + '0';
+    hdr_method[3] = iface.method + '0';
 
     finish_indicator2(name, "Frozen",
             (int) ((*packed_size_var * 100L) / *original_size_var));

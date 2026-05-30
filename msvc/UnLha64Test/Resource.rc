@@ -1,0 +1,72 @@
+#pragma code_page(65001)
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+#ifndef PBS_SMOOTH
+#define PBS_SMOOTH 0x01
+#endif
+
+IDD_MAINDIALOG DIALOGEX 0, 0, 400, 330
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "UnLha64Test - DLL Verification Tool"
+FONT 9, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_TAB, "SysTabControl32", WS_TABSTOP, 2, 2, 396, 326
+
+    // Extract Tab Controls
+    LTEXT           "出力ディレクトリ:", IDC_LBL_OUTDIR, 12, 22, 60, 8
+    EDITTEXT        IDC_OUTDIR, 75, 20, 260, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "参照...", IDC_BROWSE, 340, 20, 48, 14
+    CONTROL         "", IDC_FILELIST, "SysListView32", LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 12, 40, 376, 230
+    AUTOCHECKBOX    "同名ファイルを上書きする", IDC_CHK_OVERWRITE, 12, 275, 150, 10
+    CONTROL         "", IDC_PROGRESS_TOTAL, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 290, 320, 14
+    PUSHBUTTON      "解凍", IDC_EXTRACT, 340, 306, 48, 14
+    CONTROL         "", IDC_PROGRESS, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 306, 320, 14
+
+    // Archive Tab Controls
+    LTEXT           "圧縮ファイル:", IDC_LBL_ARCOUT, 12, 22, 60, 8
+    EDITTEXT        IDC_ARCOUT, 75, 20, 260, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "参照...", IDC_BROWSE_ARCOUT, 340, 20, 48, 14
+    CONTROL         "", IDC_FILELIST_ARC, "SysListView32", LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 12, 40, 376, 230
+    CONTROL         "", IDC_PROGRESS_ARC_TOTAL, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 290, 320, 14
+    PUSHBUTTON      "圧縮", IDC_COMPRESS, 340, 306, 48, 14
+    CONTROL         "", IDC_PROGRESS_ARC, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 306, 320, 14
+END
+
+//
+// UnLha64Test バージョン情報定義 (BOM付きUTF-8, CRLF)
+//
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L // VFT_APP (EXE)
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041104b0" // 日本語 (Unicode)
+        BEGIN
+            VALUE "CompanyName", "micosoft / akiya"
+            VALUE "FileDescription", "UnLha64Test"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "UnLha64Test"
+            VALUE "LegalCopyright", "© 2026 micosoft / akiya"
+            VALUE "OriginalFilename", "UnLha64Test.exe"
+            VALUE "ProductName", "UnLha64Test"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x411, 1200 // 日本語, Unicode (UTF-16)
+    END
+END
+

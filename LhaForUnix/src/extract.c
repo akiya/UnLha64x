@@ -14,62 +14,62 @@ decode_lzhuf(FILE *infp, FILE *outfp,
              char *name, int method, off_t *read_sizep)
 {
     unsigned int crc;
-    struct interfacing interface;
+    struct interfacing iface;
 
-    interface.method = method;
-    interface.infile = infp;
-    interface.outfile = outfp;
-    interface.original = original_size;
-    interface.packed = packed_size;
-    interface.read_size = 0;
+    iface.method = method;
+    iface.infile = infp;
+    iface.outfile = outfp;
+    iface.original = original_size;
+    iface.packed = packed_size;
+    iface.read_size = 0;
 
     switch (method) {
     case LZHUFF0_METHOD_NUM:    /* -lh0- */
-        interface.dicbit = LZHUFF0_DICBIT;
+        iface.dicbit = LZHUFF0_DICBIT;
         break;
     case LZHUFF1_METHOD_NUM:    /* -lh1- */
-        interface.dicbit = LZHUFF1_DICBIT;
+        iface.dicbit = LZHUFF1_DICBIT;
         break;
     case LZHUFF2_METHOD_NUM:    /* -lh2- */
-        interface.dicbit = LZHUFF2_DICBIT;
+        iface.dicbit = LZHUFF2_DICBIT;
         break;
     case LZHUFF3_METHOD_NUM:    /* -lh2- */
-        interface.dicbit = LZHUFF3_DICBIT;
+        iface.dicbit = LZHUFF3_DICBIT;
         break;
     case LZHUFF4_METHOD_NUM:    /* -lh4- */
-        interface.dicbit = LZHUFF4_DICBIT;
+        iface.dicbit = LZHUFF4_DICBIT;
         break;
     case LZHUFF5_METHOD_NUM:    /* -lh5- */
-        interface.dicbit = LZHUFF5_DICBIT;
+        iface.dicbit = LZHUFF5_DICBIT;
         break;
     case LZHUFF6_METHOD_NUM:    /* -lh6- */
-        interface.dicbit = LZHUFF6_DICBIT;
+        iface.dicbit = LZHUFF6_DICBIT;
         break;
     case LZHUFF7_METHOD_NUM:    /* -lh7- */
-        interface.dicbit = LZHUFF7_DICBIT;
+        iface.dicbit = LZHUFF7_DICBIT;
         break;
     case LARC_METHOD_NUM:       /* -lzs- */
-        interface.dicbit = LARC_DICBIT;
+        iface.dicbit = LARC_DICBIT;
         break;
     case LARC5_METHOD_NUM:      /* -lz5- */
-        interface.dicbit = LARC5_DICBIT;
+        iface.dicbit = LARC5_DICBIT;
         break;
     case LARC4_METHOD_NUM:      /* -lz4- */
-        interface.dicbit = LARC4_DICBIT;
+        iface.dicbit = LARC4_DICBIT;
         break;
     case PMARC0_METHOD_NUM:     /* -pm0- */
-        interface.dicbit = PMARC0_DICBIT;
+        iface.dicbit = PMARC0_DICBIT;
         break;
     case PMARC2_METHOD_NUM:     /* -pm2- */
-        interface.dicbit = PMARC2_DICBIT;
+        iface.dicbit = PMARC2_DICBIT;
         break;
     default:
         warning("unknown method %d", method);
-        interface.dicbit = LZHUFF5_DICBIT; /* for backward compatibility */
+        iface.dicbit = LZHUFF5_DICBIT; /* for backward compatibility */
         break;
     }
 
-    if (interface.dicbit == 0) { /* LZHUFF0_DICBIT or LARC4_DICBIT or PMARC0_DICBIT*/
+    if (iface.dicbit == 0) { /* LZHUFF0_DICBIT or LARC4_DICBIT or PMARC0_DICBIT*/
         start_indicator(name,
                         original_size,
                         verify_mode ? "Testing " : "Melting ",
@@ -85,12 +85,12 @@ decode_lzhuf(FILE *infp, FILE *outfp,
         start_indicator(name,
                         original_size,
                         verify_mode ? "Testing " : "Melting ",
-                        1 << interface.dicbit);
+                        1 << iface.dicbit);
         if (dump_lzss)
             printf("\n");
 
-        crc = decode(&interface);
-        *read_sizep = interface.read_size;
+        crc = decode(&iface);
+        *read_sizep = iface.read_size;
     }
 
     finish_indicator(name, verify_mode ? "Tested  " : "Melted  ");

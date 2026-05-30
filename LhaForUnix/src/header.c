@@ -500,7 +500,7 @@ wintime_to_unix_stamp()
     t = (unsigned long)get_longword();
     t |= (uint64_t)(unsigned long)get_longword() << 32;
     t = (t - epoch) / 10000000;
-    return t;
+    return (unsigned long)t;
 #else
     int i, borrow;
     unsigned long t, q, x;
@@ -597,7 +597,7 @@ get_extended_header(FILE *fp, LzHeader *hdr, size_t header_size, unsigned int *h
             if (verbose_listing && verbose > 1) printf("     < filename >\n");
 #endif
             /* filename */
-            name_length =
+            name_length = (int)
                 get_bytes(hdr->name, header_size-n, sizeof(hdr->name)-1);
             hdr->name[name_length] = 0;
             break;
@@ -606,7 +606,7 @@ get_extended_header(FILE *fp, LzHeader *hdr, size_t header_size, unsigned int *h
             if (verbose_listing && verbose > 1) printf("     < directory >\n");
 #endif
             /* directory */
-            dir_length = get_bytes(dirname, header_size-n, sizeof(dirname)-1);
+            dir_length = (int)get_bytes(dirname, (size_t)(header_size-n), sizeof(dirname)-1);
             dirname[dir_length] = 0;
             break;
         case 0x40:
@@ -668,7 +668,7 @@ get_extended_header(FILE *fp, LzHeader *hdr, size_t header_size, unsigned int *h
             if (verbose_listing && verbose > 1) printf("     < UNIX group name >\n");
 #endif
             /* UNIX group name */
-            i = get_bytes(hdr->group, header_size-n, sizeof(hdr->group)-1);
+            i = (int)get_bytes(hdr->group, (size_t)(header_size-n), sizeof(hdr->group)-1);
             hdr->group[i] = '\0';
             break;
         case 0x53:
@@ -676,7 +676,7 @@ get_extended_header(FILE *fp, LzHeader *hdr, size_t header_size, unsigned int *h
             if (verbose_listing && verbose > 1) printf("     < UNIX user name >\n");
 #endif
             /* UNIX user name */
-            i = get_bytes(hdr->user, header_size-n, sizeof(hdr->user)-1);
+            i = (int)get_bytes(hdr->user, (size_t)(header_size-n), sizeof(hdr->user)-1);
             hdr->user[i] = '\0';
             break;
         case 0x54:
@@ -708,12 +708,12 @@ get_extended_header(FILE *fp, LzHeader *hdr, size_t header_size, unsigned int *h
                      (level 3 on UNLHA32) */
             if (verbose)
                 warning("unknown extended header 0x%02x", ext_type);
-            skip_bytes(header_size - n);
+            skip_bytes((size_t)(header_size - n));
             break;
         }
 
         if (hcrc)
-            *hcrc = calccrc(*hcrc, data, header_size);
+            *hcrc = calccrc(*hcrc, data, (unsigned int)header_size);
 
         if (hdr->size_field_length == 2)
             whole_size += header_size = get_word();
@@ -841,7 +841,7 @@ get_header_level0(FILE *fp, LzHeader *hdr, char *data)
     hdr->unix_gid = 0;
     hdr->unix_uid = 0;
 
-    extend_size = header_size+2 - name_length - 24;
+    extend_size = (ssize_t)(header_size+2 - name_length - 24);
 
     if (extend_size < 0) {
         if (extend_size == -2) {
@@ -876,7 +876,7 @@ get_header_level0(FILE *fp, LzHeader *hdr, char *data)
             }
         }
         if (extend_size > 0)
-            skip_bytes(extend_size);
+            skip_bytes((size_t)extend_size);
     }
 
     hdr->header_size += 2;
@@ -966,7 +966,7 @@ get_header_level1(FILE *fp, LzHeader *hdr, char *data)
     hdr->crc = get_word();
     hdr->extend_type = get_byte();
 
-    dummy = header_size+2 - name_length - I_LEVEL1_HEADER_SIZE;
+    dummy = (int)(header_size+2 - name_length - I_LEVEL1_HEADER_SIZE);
     if (dummy > 0)
         skip_bytes(dummy); /* skip old style extend header */
 
@@ -1262,10 +1262,13 @@ get_header(FILE *fp, LzHeader *hdr)
         filename_case = optional_filename_case;
 
     /* kanji code and delimiter conversion */
-    convert_filename(hdr->name, strlen(hdr->name), sizeof(hdr->name),
+    convert_filename(hdr->name, (int)strlen(hdr->name), (int)sizeof(hdr->name),
                      archive_kanji_code,
                      system_kanji_code,
                      archive_delim, system_delim, filename_case);
+
+    /* always strip absolute root for extraction and listing */
+    strip_absolute_root(hdr->name);
 
     if ((hdr->unix_mode & UNIX_FILE_SYMLINK) == UNIX_FILE_SYMLINK) {
         char *p;
@@ -1288,40 +1291,59 @@ get_header(FILE *fp, LzHeader *hdr)
 int
 seek_lha_header(FILE *fp)
 {
-    unsigned char   buffer[64 * 1024]; /* max seek size */
-    unsigned char  *p;
+    off_t           offset = 0;
+    unsigned char   buf[4096];
     int             n;
+    int             i;
 
-    n = fread(buffer, 1, sizeof(buffer), fp);
+    fseeko(fp, 0, SEEK_SET);
 
-    for (p = buffer; p < buffer + n; p++) {
-        if (! (p[I_METHOD]=='-' &&
-               (p[I_METHOD+1]=='l' || p[I_METHOD+1]=='p') &&
-               p[I_METHOD+4]=='-'))
-            continue;
-        /* found "-[lp]??-" keyword (as METHOD type string) */
+    while (1) {
+        /* 現在のファイルポインタの位置を取得 */
+        offset = ftello(fp);
 
-        /* level 0 or 1 header */
-        if ((p[I_HEADER_LEVEL] == 0 || p[I_HEADER_LEVEL] == 1)
-            && p[I_HEADER_SIZE] > 20
-            && p[I_HEADER_CHECKSUM] == calc_sum(p+2, p[I_HEADER_SIZE])) {
-            if (fseeko(fp, (p - buffer) - n, SEEK_CUR) == -1)
-                fatal_error("cannot seek header");
-            return 0;
+        /* バッファサイズ分データを読み込む */
+        n = fread(buf, 1, sizeof(buf), fp);
+        if (n < 24) { /* 最小ヘッダサイズに満たない場合は終了 */
+            break;
         }
 
-        /* level 2 header */
-        if (p[I_HEADER_LEVEL] == 2
-            && p[I_HEADER_SIZE] >= 24
-            && p[I_ATTRIBUTE] == 0x20) {
-            if (fseeko(fp, (p - buffer) - n, SEEK_CUR) == -1)
-                fatal_error("cannot seek header");
-            return 0;
+        /* バッファ内を走査してLHAヘッダのキーワードを探す */
+        for (i = 0; i <= n - 24; i++) {
+            unsigned char *p = buf + i;
+            if (p[I_METHOD] == '-' &&
+                (p[I_METHOD+1] == 'l' || p[I_METHOD+1] == 'p') &&
+                p[I_METHOD+4] == '-') {
+                
+                /* "-[lp]??-" キーワードを発見 */
+                /* レベル0または1のヘッダ */
+                if ((p[I_HEADER_LEVEL] == 0 || p[I_HEADER_LEVEL] == 1)
+                    && p[I_HEADER_SIZE] > 20
+                    && p[I_HEADER_CHECKSUM] == calc_sum(p+2, p[I_HEADER_SIZE])) {
+                    if (fseeko(fp, offset + i, SEEK_SET) == -1)
+                        fatal_error("cannot seek header");
+                    return 0;
+                }
+
+                /* レベル2のヘッダ */
+                if (p[I_HEADER_LEVEL] == 2
+                    && p[I_HEADER_SIZE] >= 24
+                    && p[I_ATTRIBUTE] == 0x20) {
+                    if (fseeko(fp, offset + i, SEEK_SET) == -1)
+                        fatal_error("cannot seek header");
+                    return 0;
+                }
+            }
+        }
+
+        /* 次の読み込み位置へ移動（境界のまたがりを考慮して重複して読み込む） */
+        if (fseeko(fp, offset + (sizeof(buf) - 24), SEEK_SET) == -1) {
+            break;
         }
     }
 
-    if (fseeko(fp, -n, SEEK_CUR) == -1)
-        fatal_error("cannot seek header");
+    /* 見つからなかった場合はファイルポインタを先頭に戻す */
+    fseeko(fp, 0, SEEK_SET);
     return -1;
 }
 
@@ -1404,11 +1426,11 @@ canon_path(char *newpath, char *path, size_t size)
             path += 2;
         else {
             int len;
-            len = copy_path_element(newpath, path, size);
+            len = (int)copy_path_element(newpath, path, size);
 
             path += len;
             newpath += len;
-            size -= len;
+            size -= (size_t)len;
             if (size <= 1)
                 break;
         }
@@ -1423,7 +1445,7 @@ canon_path(char *newpath, char *path, size_t size)
         newpath++;
     }
 
-    return newpath - p;         /* string length */
+    return (int)(newpath - p);         /* string length */
 }
 
 void
@@ -1442,7 +1464,12 @@ init_header(char *name, struct stat *v_stat, LzHeader *hdr)
     hdr->attribute = GENERIC_ATTRIBUTE;
     hdr->header_level = header_level;
 
-    len = canon_path(hdr->name, name, sizeof(hdr->name));
+    len = (int)canon_path(hdr->name, name, sizeof(hdr->name));
+
+    if (!enable_absolute_path) {
+        strip_absolute_root(hdr->name);
+        len = (int)strlen(hdr->name);
+    }
 
     hdr->crc = 0x0000;
     hdr->extend_type = EXTEND_UNIX;
@@ -1550,15 +1577,15 @@ write_unix_info(LzHeader *hdr)
     put_word(hdr->unix_uid);
 
     if (hdr->group[0]) {
-        int len = strlen(hdr->group);
-        put_word(len + 3);  /* size */
+        int len = (int)strlen(hdr->group);
+        put_word((unsigned int)(len + 3));  /* size */
         put_byte(0x52);     /* group name */
         put_bytes(hdr->group, len);
     }
 
     if (hdr->user[0]) {
-        int len = strlen(hdr->user);
-        put_word(len + 3);  /* size */
+        int len = (int)strlen(hdr->user);
+        put_word((unsigned int)(len + 3));  /* size */
         put_byte(0x53);     /* user name */
         put_bytes(hdr->user, len);
     }
@@ -1583,9 +1610,9 @@ write_header_level0(char *data, LzHeader *hdr, char *pathname)
     put_byte(0x00);             /* header size */
     put_byte(0x00);             /* check sum */
     put_bytes(hdr->method, 5);
-    put_longword(hdr->packed_size);
-    put_longword(hdr->original_size);
-    put_longword(unix_to_generic_stamp(hdr->unix_last_modified_stamp));
+    put_longword((long)hdr->packed_size);
+    put_longword((long)hdr->original_size);
+    put_longword((long)unix_to_generic_stamp(hdr->unix_last_modified_stamp));
     put_byte(hdr->attribute);
     put_byte(hdr->header_level); /* level 0 */
 
@@ -1638,9 +1665,9 @@ write_header_level1(char *data, LzHeader *hdr, char *pathname)
     basename = strrchr(pathname, LHA_PATHSEP);
     if (basename) {
         basename++;
-        name_length = strlen(basename);
+        name_length = (int)strlen(basename);
         dirname = pathname;
-        dir_length = basename - dirname;
+        dir_length = (int)(basename - dirname);
     }
     else {
         basename = pathname;
@@ -1655,9 +1682,9 @@ write_header_level1(char *data, LzHeader *hdr, char *pathname)
     put_byte(0x00);             /* header size */
     put_byte(0x00);             /* check sum */
     put_bytes(hdr->method, 5);
-    put_longword(hdr->packed_size);
-    put_longword(hdr->original_size);
-    put_longword(unix_to_generic_stamp(hdr->unix_last_modified_stamp));
+    put_longword((long)hdr->packed_size);
+    put_longword((long)hdr->original_size);
+    put_longword((long)unix_to_generic_stamp(hdr->unix_last_modified_stamp));
     put_byte(0x20);
     put_byte(hdr->header_level); /* level 1 */
 
@@ -1708,10 +1735,10 @@ write_header_level1(char *data, LzHeader *hdr, char *pathname)
 
     /* put `skip size' */
     setup_put(data + I_PACKED_SIZE);
-    put_longword(hdr->packed_size);
+    put_longword((long)hdr->packed_size);
 
-    data[I_HEADER_SIZE] = header_size;
-    data[I_HEADER_CHECKSUM] = calc_sum(data + I_METHOD, header_size);
+    data[I_HEADER_SIZE] = (char)header_size;
+    data[I_HEADER_CHECKSUM] = (char)calc_sum(data + I_METHOD, (int)header_size);
 
     return header_size + extend_header_size + 2;
 }
@@ -1731,7 +1758,7 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
         basename++;
         name_length = strlen(basename);
         dirname = pathname;
-        dir_length = basename - dirname;
+        dir_length = (int)(basename - dirname);
     }
     else {
         basename = pathname;
@@ -1745,9 +1772,9 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
 
     put_word(0x0000);           /* header size */
     put_bytes(hdr->method, 5);
-    put_longword(hdr->packed_size);
-    put_longword(hdr->original_size);
-    put_longword(hdr->unix_last_modified_stamp);
+    put_longword((long)hdr->packed_size);
+    put_longword((long)hdr->original_size);
+    put_longword((long)hdr->unix_last_modified_stamp);
     put_byte(0x20);
     put_byte(hdr->header_level); /* level 2 */
 
@@ -1785,7 +1812,7 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
 
     put_word(0x0000);           /* next header size */
 
-    header_size = put_ptr - data;
+    header_size = (size_t)(put_ptr - data);
     if ((header_size & 0xff) == 0) {
         /* cannot put zero at the first byte on level 2 header. */
         /* adjust header size. */
@@ -1795,7 +1822,7 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
 
     /* put header size */
     setup_put(data + I_HEADER_SIZE);
-    put_word(header_size);
+    put_word((unsigned int)header_size);
 
     /* put header CRC in extended header */
     INITIALIZE_CRC(hcrc);
@@ -1848,7 +1875,7 @@ write_header(FILE *fp, LzHeader *hdr)
         pathname[sizeof(pathname)-1] = 0;
     }
 
-    convert_filename(pathname, strlen(pathname), sizeof(pathname),
+    convert_filename(pathname, (int)strlen(pathname), sizeof(pathname),
                      system_kanji_code,
                      archive_kanji_code,
                      system_delim, archive_delim, filename_case);
@@ -1960,7 +1987,7 @@ cap_to_sjis(char *dst, const char *src, size_t dstsize)
             dst[j++] = ':';
             strncpy(dst+j, src+i, dstsize-j);
             dst[dstsize-1] = 0;
-            return strlen(dst);
+            return (int)strlen(dst);
         }
 
         i++;
@@ -1982,7 +2009,7 @@ sjis_to_cap(char *dst, const char *src, size_t dstsize)
         if (src[i] == ':') {
             strncpy(dst+j, ":3a", dstsize-j);
             dst[dstsize-1] = 0;
-            j = strlen(dst);
+            j = (int)strlen(dst);
             continue;
         }
         if (isprint(src[i])) {

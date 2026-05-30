@@ -19,7 +19,9 @@
 #include <errno.h>
 #include <ctype.h>
 #include <sys/types.h>
+#ifndef _MSC_VER
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <signal.h>
 
@@ -112,7 +114,11 @@ typedef long ssize_t;
 #endif
 
 #if HAVE_UTIME_H
-#include <utime.h>
+# ifdef _MSC_VER
+#  include <sys/utime.h>
+# else
+#  include <utime.h>
+# endif
 #else
 struct utimbuf {
     time_t actime;
@@ -202,10 +208,13 @@ int fnmatch(const char *pattern, const char *string, int flags);
 
 #endif /* HAVE_LIMITS_H */
 
-#if !HAVE_FSEEKO
+#if defined(_MSC_VER)
+# define fseeko  _fseeki64
+# define ftello  _ftelli64
+#elif !HAVE_FSEEKO
 # define fseeko  fseek
 #endif
-#if !HAVE_FTELLO
+#if !defined(_MSC_VER) && !HAVE_FTELLO
 # define ftello  ftell
 #endif
 
@@ -213,8 +222,37 @@ int fnmatch(const char *pattern, const char *string, int flags);
 
 #define exit(n) lha_exit(n)
 
+#ifdef LHA_LIBRARY
+/* GUI環境(DLL)用: 標準入出力へのアクセスによるクラッシュを防止 */
+/* 
+   可変個引数マクロの中に #ifdef があるとコンパイルエラーになるため、
+   関数名そのものを置換し、callback.c で定義した関数を呼び出すようにします。
+*/
+#define printf lha_printf
+#define fprintf lha_fprintf
+#define vfprintf lha_vfprintf
+#define putchar lha_putchar
+#define putc lha_putc
+#define fputc lha_fputc
+#define puts lha_puts
+#define fputs lha_fputs
+#define fflush lha_fflush
+
+#include <stdio.h>
+#include <stdarg.h>
+extern int lha_printf(const char *fmt, ...);
+extern int lha_fprintf(FILE *f, const char *fmt, ...);
+extern int lha_vfprintf(FILE *f, const char *fmt, va_list ap);
+extern int lha_putchar(int c);
+extern int lha_putc(int c, FILE *f);
+extern int lha_fputc(int c, FILE *f);
+extern int lha_puts(const char *s);
+extern int lha_fputs(const char *s, FILE *f);
+extern int lha_fflush(FILE *f);
+#endif
+
 struct encode_option {
-#if defined(__STDC__) || defined(AIX)
+#if defined(__STDC__) || defined(AIX) || defined(_MSC_VER)
     void            (*output) (unsigned int code, unsigned int pos);
     void            (*encode_start) ();
     void            (*encode_end) ();
@@ -228,7 +266,7 @@ struct encode_option {
 struct decode_option {
     unsigned short  (*decode_c) ();
     unsigned short  (*decode_p) ();
-#if defined(__STDC__) || defined(AIX)
+#if defined(__STDC__) || defined(AIX) || defined(_MSC_VER)
     void            (*decode_start) ();
 #else
     int             (*decode_start) ();
@@ -238,7 +276,7 @@ struct decode_option {
 /* ------------------------------------------------------------------------ */
 /*  LHa File Type Definition                                                */
 /* ------------------------------------------------------------------------ */
-typedef int boolean;            /* TRUE or FALSE */
+typedef int lha_bool;            /* TRUE or FALSE */
 
 struct string_pool {
     int             used;
@@ -291,6 +329,8 @@ struct interfacing {
 #else
 #define EXTERN extern
 #endif
+
+EXTERN int      error_occurred;
 
 /* command line options (common options) */
 EXTERN boolean  quiet;
@@ -359,6 +399,7 @@ EXTERN int      convertcase;    /* 2000.10.6 */
 
 EXTERN char     iconv_code_system[FILENAME_LENGTH];
 EXTERN char     iconv_code_archive[FILENAME_LENGTH];
+EXTERN boolean  enable_absolute_path;
 
 /* slide.c */
 EXTERN int      unpackable;
@@ -391,6 +432,8 @@ EXTERN unsigned int n_max;
 
 /* lhadd.c */
 EXTERN int temporary_fd;
+EXTERN FILE *g_infp;
+EXTERN FILE *g_outfp;
 
 /* ------------------------------------------------------------------------ */
 /*  Functions                                                               */

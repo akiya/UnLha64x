@@ -1,0 +1,32 @@
+LIBRARY UNLHA64X
+EXPORTS
+    Unlha                  @1
+    UnlhaW                 @81
+    UnlhaGetVersion        @2
+    UnlhaGetRunning        @3
+    UnlhaCheckArchive      @4
+    UnlhaCheckArchiveW     @84
+    UnlhaConfigDialog      @5
+    UnlhaGetFileCount      @6
+    UnlhaQueryFunctionList @7
+    UnlhaOpenArchive       @100
+    UnlhaOpenArchiveW      @180
+    UnlhaCloseArchive      @101
+    UnlhaFindFirst         @102
+    UnlhaFindFirstW        @182
+    UnlhaFindNext          @103
+    UnlhaFindNextW         @183
+    UnlhaGetArcFileName    @104
+    UnlhaGetArcFileNameW   @184
+    UnlhaGetArcFileSize    @105
+    UnlhaGetArcFileSizeEx  @106
+    UnlhaGetArcOriginalSize @107
+    UnlhaGetArcOriginalSizeEx @108
+    UnlhaGetArcCompressedSize @109
+    UnlhaGetArcCompressedSizeEx @110
+    UnlhaSetOwnerWindow    @200
+    UnlhaClearOwnerWindow  @201
+    UnlhaSetOwnerWindowEx  @202
+    UnlhaKillOwnerWindowEx @203
+    UnlhaSetOwnerWindowExTotal @204
+

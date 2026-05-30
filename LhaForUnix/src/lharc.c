@@ -44,8 +44,8 @@
 
 #include "lha.h"
 
-static int      cmd = CMD_UNKNOWN;
-static int error_occurred;
+int      cmd = CMD_UNKNOWN;
+int      error_occurred = 0;
 
 /* static functions */
 static void     sort_files();
@@ -53,10 +53,18 @@ static void     print_version();
 
 extern int optional_archive_kanji_code;
 extern int optional_system_kanji_code;
+extern char *optional_archive_delim;
+extern char *optional_system_delim;
+extern int optional_filename_case;
+
+extern char *optarg;
+extern int optind;
+extern int opterr;
+extern int optopt;
 
 /* ------------------------------------------------------------------------ */
-static void
-init_variable()     /* Added N.Watazaki */
+void
+lha_init_variable()     /* Added N.Watazaki */
 {
 /* options */
     quiet           = FALSE;
@@ -113,6 +121,22 @@ init_variable()     /* Added N.Watazaki */
 
     *iconv_code_system  = '\0';
     *iconv_code_archive = '\0';
+
+    archive_name = NULL;
+    cmd = CMD_UNKNOWN;
+    error_occurred = 0;
+
+    optional_archive_kanji_code = NONE;
+    optional_system_kanji_code = NONE;
+    optional_archive_delim = NULL;
+    optional_system_delim = NULL;
+    optional_filename_case = NONE;
+    enable_absolute_path = FALSE;
+
+    optarg = NULL;
+    optind = 0;
+    opterr = 1;
+    optopt = 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -215,8 +239,8 @@ commands:                           options:\n\
 /*
   Parse LHA options
 */
-static int
-parse_suboption(int argc, char **argv)
+int
+lha_parse_suboption(int argc, char **argv)
 {
     enum {
         HELP_OPTION = 256,
@@ -240,12 +264,13 @@ parse_suboption(int argc, char **argv)
         {"traditional", no_argument, 0, TRADITIONAL_BEHAVIOR},
         {"ignore-mac-files", no_argument, 0, IGNORE_MAC_FILES},
         {"timestamp-archive", no_argument, &timestamp_archive, 1},
+        {"enable-absolute-path", no_argument, &enable_absolute_path, TRUE},
         {"debug", required_argument, 0, DEBUG_OPTION},
         {0, 0, 0, 0}
     };
     int i;
 
-    char short_options[256] = "q[012]vnfto[567]dizg012ew:x:";
+    char short_options[256] = "q[012]rvnftoy[567]dizg012ew:x:";
     /* "[...]" means optional 1 byte argument (original extention) */
 
 #if HAVE_LIBAPPLEFILE
@@ -297,6 +322,7 @@ parse_suboption(int argc, char **argv)
                 break;
             }
             break;
+        case 'y':
         case 'f':
             force = TRUE;
             break;
@@ -319,6 +345,9 @@ parse_suboption(int argc, char **argv)
 #endif
         case 'n':
             noexec = TRUE;
+            break;
+        case 'r':
+            /* ignore -r option for UNLHA32 compatibility */
             break;
         case 'g':
             generic_format = TRUE;
@@ -528,8 +557,8 @@ parse_suboption(int argc, char **argv)
 /*
   Parse LHA command and options.
 */
-static int
-parse_option(int argc, char **argv)
+int
+lha_parse_option(int argc, char **argv)
 {
     char *cmd_char;
 
@@ -625,9 +654,37 @@ parse_option(int argc, char **argv)
         argv[1] = cmd_char;
     }
 
-    return parse_suboption(argc, argv);
+    return lha_parse_suboption(argc, argv);
 }
 
+/* ------------------------------------------------------------------------ */
+int
+lha_execute()
+{
+    /* make crc table */
+    make_crctable();
+
+    switch (cmd) {
+    case CMD_EXTRACT:
+        cmd_extract();
+        break;
+    case CMD_ADD:
+        cmd_add();
+        break;
+    case CMD_LIST:
+        cmd_list();
+        break;
+    case CMD_DELETE:
+        cmd_delete();
+        break;
+    }
+
+    if (error_occurred)
+        return 1;
+    return 0;
+}
+
+#ifndef LHA_LIBRARY
 /* ------------------------------------------------------------------------ */
 int
 main(int argc, char *argv[])
@@ -636,9 +693,9 @@ main(int argc, char *argv[])
 
     int i;
 
-    init_variable();        /* Added N.Watazaki */
+    lha_init_variable();        /* Added N.Watazaki */
 
-    if (parse_option(argc, argv) == -1) {
+    if (lha_parse_option(argc, argv) == -1) {
         fputs("\n", stderr);
         print_tiny_usage();
         exit(2);
@@ -655,15 +712,6 @@ main(int argc, char *argv[])
         if (!isatty(1) && cmd == CMD_ADD)
             quiet = TRUE;
     }
-#if 0 /* Comment out; IMHO, this feature is useless. by Koji Arai */
-    else {
-        if (argc == 3 && !isatty(0)) { /* 1999.7.18 */
-            /* Bug(?) on MinGW, isatty() return 0 on Cygwin console.
-               mingw-runtime-1.3-2 and Cygwin 1.3.10(0.51/3/2) on Win2000 */
-            get_filename_from_stdin = TRUE;
-        }
-    }
-#endif
 
     /* target file name */
     if (get_filename_from_stdin) {
@@ -699,28 +747,9 @@ main(int argc, char *argv[])
 
     sort_files();
 
-    /* make crc table */
-    make_crctable();
-
-    switch (cmd) {
-    case CMD_EXTRACT:
-        cmd_extract();
-        break;
-    case CMD_ADD:
-        cmd_add();
-        break;
-    case CMD_LIST:
-        cmd_list();
-        break;
-    case CMD_DELETE:
-        cmd_delete();
-        break;
-    }
-
-    if (error_occurred)
-        return 1;
-    return 0;
+    return lha_execute();
 }
+#endif /* LHA_LIBRARY */
 
 
 /* ------------------------------------------------------------------------ */
@@ -736,6 +765,7 @@ print_version()
       fprintf(stdout, "  configure options: %s\n", LHA_CONFIGURE_OPTIONS);
 }
 
+#ifndef LHA_LIBRARY
 void
 #if STDC_HEADERS
 message(char *fmt, ...)
@@ -758,8 +788,10 @@ message(fmt, va_alist)
 
     errno =  errno_sv;
 }
+#endif
 
 /* ------------------------------------------------------------------------ */
+#ifndef LHA_LIBRARY
 void
 #if STDC_HEADERS
 warning(char *fmt, ...)
@@ -782,8 +814,10 @@ warning(fmt, va_alist)
 
     errno =  errno_sv;
 }
+#endif
 
 /* ------------------------------------------------------------------------ */
+#ifndef LHA_LIBRARY
 void
 #if STDC_HEADERS
 error(char *fmt, ...)
@@ -808,7 +842,9 @@ error(fmt, va_alist)
 
     errno =  errno_sv;
 }
+#endif
 
+#ifndef LHA_LIBRARY
 void
 #if STDC_HEADERS
 fatal_error(char *fmt, ...)
@@ -834,7 +870,9 @@ fatal_error(fmt, va_alist)
 
     exit(1);
 }
+#endif
 
+#ifndef LHA_LIBRARY
 void
 cleanup()
 {
@@ -854,6 +892,7 @@ cleanup()
         remove_extracting_file_when_interrupt = FALSE;
     }
 }
+#endif
 
 RETSIGTYPE
 interrupt(int signo)
@@ -933,7 +972,7 @@ xrealloc(void *old, size_t size)
 char *
 xstrdup(char *str)
 {
-    int len = strlen(str);
+    int len = (int)strlen(str);
     char *p = (char *)xmalloc(len + 1);
     strcpy(p, str);             /* ok */
     return p;
@@ -1138,7 +1177,7 @@ find_files(char *name, int *v_filec, char ***v_filev)
         exist_arc = 0;
 
     while ((dp = readdir(dirp)) != NULL) {
-        n = NAMLEN(dp);
+        n = (int)NAMLEN(dp);
 
         /* exclude '.' and '..' */
         if (strncmp(dp->d_name, ".", n) == 0
@@ -1220,7 +1259,7 @@ build_temporary_name()
     s = strrchr(temporary_name, '/');
     if (s) {
         int len;
-        len = s - temporary_name;
+        len = (int)(s - temporary_name);
         if (len + strlen("lhXXXXXX") < sizeof(temporary_name))
             /* use directory at archive file */
             strcpy(s, "lhXXXXXX"); /* ok */
@@ -1271,7 +1310,7 @@ modify_filename_extention(char *buffer, char *ext, size_t size)
     if (dot)
         p = dot;
 
-    str_safe_copy(p, ext, size - (p - buffer));
+    str_safe_copy(p, ext, (int)(size - (p - buffer)));
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1279,7 +1318,7 @@ modify_filename_extention(char *buffer, char *ext, size_t size)
 void
 build_backup_name(char *buffer, char *original, size_t size)
 {
-    str_safe_copy(buffer, original, size);
+    str_safe_copy(buffer, original, (int)size);
     modify_filename_extention(buffer, BACKUPNAME_EXTENTION, size);    /* ".bak" */
 }
 
@@ -1287,7 +1326,7 @@ build_backup_name(char *buffer, char *original, size_t size)
 void
 build_standard_archive_name(char *buffer, char *original, size_t size)
 {
-    str_safe_copy(buffer, original, size);
+    str_safe_copy(buffer, original, (int)size);
     modify_filename_extention(buffer, ARCHIVENAME_EXTENTION, size);   /* ".lzh" */
 }
 
@@ -1437,7 +1476,7 @@ inquire(char *msg, char *name, char *selective)
 
         for (p = selective; *p; p++)
             if (buffer[0] == *p)
-                return p - selective;
+                return (int)(p - selective);
     }
     /* NOTREACHED */
 }
@@ -1452,9 +1491,11 @@ write_archive_tail(FILE *nafp)
 /* ------------------------------------------------------------------------ */
 #undef exit
 
+#ifndef LHA_LIBRARY
 void
 lha_exit(int status)
 {
     cleanup();
     exit(status);
 }
+#endif

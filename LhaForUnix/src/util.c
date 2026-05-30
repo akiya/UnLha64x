@@ -43,7 +43,7 @@ copyfile(FILE *f1, FILE *f2, off_t size,
             }
         }
         else {
-            xsize = (size > BUFFERSIZE) ? BUFFERSIZE : size;
+            xsize = (unsigned short)((size > BUFFERSIZE) ? BUFFERSIZE : size);
             if (fread(buf, 1, xsize, f1) != xsize) {
                 fatal_error("file read error");
             }
@@ -70,10 +70,8 @@ copyfile(FILE *f1, FILE *f2, off_t size,
         /* calculate crc */
         if (crcp) {
             *crcp = calccrc(*crcp, buf, xsize);
-#ifdef NEED_INCREMENTAL_INDICATOR
-            put_indicator(xsize);
-#endif
         }
+        put_indicator(xsize);
         rsize += xsize;
     }
     free(buf);
@@ -83,14 +81,10 @@ copyfile(FILE *f1, FILE *f2, off_t size,
 int
 encode_stored_crc(FILE *ifp, FILE *ofp, off_t size, off_t *original_size_var, off_t *write_size_var)
 {
-    int save_quiet;
     unsigned int crc;
 
-    save_quiet = quiet;
-    quiet = 1;
     size = copyfile(ifp, ofp, size, 1, &crc);
     *original_size_var = *write_size_var = size;
-    quiet = save_quiet;
     return crc;
 }
 
@@ -98,7 +92,7 @@ encode_stored_crc(FILE *ifp, FILE *ofp, off_t size, off_t *original_size_var, of
 boolean
 archive_is_msdos_sfx1(char *name)
 {
-    int len = strlen(name);
+    int len = (int)strlen(name);
 
     if (len >= 4) {
         if (strcasecmp(".COM", name + len - 4) == 0 ||
@@ -108,6 +102,17 @@ archive_is_msdos_sfx1(char *name)
 
     if (len >= 2 && strcasecmp(".x", name + len - 2) == 0)
         return 1;
+
+    /* ファイルの中身を確認し、先頭が "MZ" (EXEファイルシグネチャ) の場合もSFXとして扱う */
+    FILE *fp = fopen(name, "rb");
+    if (fp) {
+        int c1 = fgetc(fp);
+        int c2 = fgetc(fp);
+        fclose(fp);
+        if (c1 == 0x4D && c2 == 0x5A) { /* 'M', 'Z' */
+            return 1;
+        }
+    }
 
     return 0;
 }
@@ -276,7 +281,6 @@ xmemrchr(const char *s, int c, size_t n)
 char *
 basename(char *s)
 {
-    int len;
     char *t;
 
     if (!s || *s == 0)
@@ -317,4 +321,32 @@ str_safe_copy(char *dst, const char *src, int dstsz)
 			   this function was same as strncpy(). */
 
     return i;
+}
+
+void
+strip_absolute_root(char *path)
+{
+    char *p = path;
+
+    /* 1. Handle drive letter (e.g., C:\...) */
+    if (p[0] && p[1] == ':') {
+        p += 2;
+    }
+    /* 2. Handle UNC (e.g., \\server\share\...) */
+    else if ((p[0] == '/' || p[0] == '\\') && (p[1] == '/' || p[1] == '\\')) {
+        p += 2;
+        /* Skip server */
+        while (*p && *p != '/' && *p != '\\') p++;
+        if (*p) p++; /* skip separator */
+        /* Skip share */
+        while (*p && *p != '/' && *p != '\\') p++;
+        if (*p) p++; /* skip separator */
+    }
+
+    /* 3. Skip leading separators */
+    while (*p == '/' || *p == '\\' || (unsigned char)*p == LHA_PATHSEP) p++;
+
+    if (p != path) {
+        memmove(path, p, strlen(p) + 1);
+    }
 }

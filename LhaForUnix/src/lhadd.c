@@ -11,6 +11,41 @@
 /* ------------------------------------------------------------------------ */
 static void     remove_files(int filec, char **filev);
 
+/* 全体進捗通知のための外部関数 */
+extern int Lha_GetEnableTotalProgress();
+extern void Lha_SetTotalProgressInfo(__int64 total_bytes, int total_files);
+
+/* 圧縮対象ファイルの事前スキャン用再帰関数 */
+static void
+scan_add_files_recursive(const char *name, __int64 *total_bytes, int *total_files)
+{
+    struct stat stbuf;
+    int filec;
+    char **filev;
+    int i;
+
+    if (GETSTAT(name, &stbuf) < 0) {
+        return;
+    }
+
+    if (is_directory(&stbuf)) {
+        if (recursive_archiving) {
+            if (find_files(name, &filec, &filev)) {
+                for (i = 0; i < filec; i++) {
+                    scan_add_files_recursive(filev[i], total_bytes, total_files);
+                }
+                free_files(filec, filev);
+            }
+        }
+    }
+    else if (is_regularfile(&stbuf) || is_symlink(&stbuf)) {
+        (*total_files)++;
+        if (is_regularfile(&stbuf)) {
+            (*total_bytes) += stbuf.st_size;
+        }
+    }
+}
+
 static char     new_archive_name_buffer[FILENAME_LENGTH];
 static char    *new_archive_name;
 static time_t most_recent;      /* for time-stamp archiving */
@@ -60,14 +95,19 @@ add_one(FILE *fp, FILE *nafp, LzHeader *hdr)
     }
 
     if (hdr->original_size == 0) {  /* empty file, symlink or directory */
+        start_indicator(hdr->name, 0, "Frozen", 2048);
         finish_indicator2(hdr->name, "Frozen", 0);
         return;     /* previous write_header is not DUMMY. (^_^) */
     }
     org_pos = ftello(fp);
     data_pos = ftello(nafp);
 
+    g_infp = fp;
+    g_outfp = nafp;
     hdr->crc = encode_lzhuf(fp, nafp, hdr->original_size,
           &v_original_size, &v_packed_size, hdr->name, hdr->method);
+    g_infp = NULL;
+    g_outfp = NULL;
 
     if (v_packed_size < v_original_size) {
         next_pos = ftello(nafp);
@@ -75,8 +115,14 @@ add_one(FILE *fp, FILE *nafp, LzHeader *hdr)
     else {          /* retry by stored method */
         fseeko(fp, org_pos, SEEK_SET);
         fseeko(nafp, data_pos, SEEK_SET);
+        g_infp = fp;
+        g_outfp = nafp;
+        start_indicator(hdr->name, hdr->original_size, "Storing ", 2048);
         hdr->crc = encode_stored_crc(fp, nafp, hdr->original_size,
                       &v_original_size, &v_packed_size);
+        finish_indicator2(hdr->name, "Stored ", 100);
+        g_infp = NULL;
+        g_outfp = NULL;
         fflush(nafp);
         next_pos = ftello(nafp);
 #if HAVE_FTRUNCATE
@@ -102,7 +148,7 @@ append_it(char *name, FILE *oafp, FILE *nafp)
 {
     LzHeader        ahdr, hdr;
     FILE           *fp;
-    long            old_header;
+    off_t            old_header;
     int             cmp;
     int             filec;
     char          **filev;
@@ -193,7 +239,10 @@ append_it(char *name, FILE *oafp, FILE *nafp)
         }
     }
 
-    if (fp) fclose(fp);
+    if (fp) {
+        fclose(fp);
+        g_infp = NULL;
+    }
 
     if (directory && recursive_archiving) {            /* recursive call */
         if (find_files(name, &filec, &filev)) {
@@ -214,7 +263,7 @@ find_update_files(FILE *oafp)  /* oafp: old archive */
     LzHeader        hdr;
     off_t           pos;
     struct stat     stbuf;
-    int             len;
+    size_t          len;
 
     pos = ftello(oafp);
 
@@ -222,7 +271,7 @@ find_update_files(FILE *oafp)  /* oafp: old archive */
     while (get_header(oafp, &hdr)) {
         if ((hdr.unix_mode & UNIX_FILE_TYPEMASK) == UNIX_FILE_REGULAR) {
             if (stat(hdr.name, &stbuf) >= 0)    /* exist ? */
-                add_sp(&sp, hdr.name, strlen(hdr.name) + 1);
+                add_sp(&sp, hdr.name, (int)strlen(hdr.name) + 1);
         }
         else if ((hdr.unix_mode & UNIX_FILE_TYPEMASK) == UNIX_FILE_DIRECTORY) {
             strcpy(name, hdr.name); /* ok */
@@ -230,7 +279,7 @@ find_update_files(FILE *oafp)  /* oafp: old archive */
             if (len > 0 && name[len - 1] == '/')
                 name[--len] = '\0'; /* strip tail '/' */
             if (stat(name, &stbuf) >= 0)    /* exist ? */
-                add_sp(&sp, name, len + 1);
+                add_sp(&sp, name, (int)len + 1);
         }
         fseeko(oafp, hdr.packed_size, SEEK_CUR);
     }
@@ -258,14 +307,9 @@ delete(FILE *oafp, FILE *nafp)
                     message("delete %s", ahdr.name);
             }
         }
-        else {      /* copy */
-            if (noexec) {
-                fseeko(oafp, ahdr.packed_size, SEEK_CUR);
-            }
-            else {
-                fseeko(oafp, old_header_pos, SEEK_SET);
-                copy_old_one(oafp, nafp, &ahdr);
-            }
+        else {
+            fseeko(oafp, old_header_pos, SEEK_SET);
+            copy_old_one(oafp, nafp, &ahdr);
         }
         old_header_pos = ftello(oafp);
     }
@@ -466,7 +510,7 @@ cmd_add()
     LzHeader        ahdr;
     FILE           *oafp, *nafp;
     int             i;
-    long            old_header;
+    off_t            old_header;
     boolean         old_archive_exist;
     off_t           new_archive_size;
 
@@ -522,11 +566,39 @@ cmd_add()
     /* cleaning arguments */
     cleaning_files(&cmd_filec, &cmd_filev);
     if (cmd_filec == 0) {
-        if (oafp)
+        if (oafp) {
             fclose(oafp);
-        if (!noexec)
+            g_infp = NULL;
+        }
+        if (!noexec) {
             fclose(nafp);
+            g_outfp = NULL;
+        }
         return;
+    }
+
+    /* 拡張全体進捗のための事前スキャン */
+    if (Lha_GetEnableTotalProgress()) {
+        __int64 total_bytes = 0;
+        int total_files = 0;
+        for (i = 0; i < cmd_filec; i++) {
+            int j;
+            if (strcmp(cmd_filev[i], archive_name) == 0) {
+                continue;
+            }
+            /* exclude files specified by -x option */
+            for (j = 0; exclude_files && exclude_files[j]; j++) {
+                if (fnmatch(exclude_files[j], basename(cmd_filev[i]),
+                            FNM_PATHNAME|FNM_NOESCAPE|FNM_PERIOD) == 0)
+                    goto skip_scan;
+            }
+
+            scan_add_files_recursive(cmd_filev[i], &total_bytes, &total_files);
+
+        skip_scan:
+            ;
+        }
+        Lha_SetTotalProgressInfo(total_bytes, total_files);
     }
 
     for (i = 0; i < cmd_filec; i++) {
@@ -567,6 +639,7 @@ cmd_add()
             old_header = ftello(oafp);
         }
         fclose(oafp);
+        g_infp = NULL;
     }
 
     new_archive_size = 0;       /* avoid compiler warnings `uninitialized' */

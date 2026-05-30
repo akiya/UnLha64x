@@ -1,3 +1,12 @@
-/msvc/bin/
-/msvc/obj/
-/UNLHA32/
+bin/
+obj/
+.vs/
+.vscode/
+*.vcxproj.user
+*.aps
+/Header/*
+!/Header/_*
+!/Header/UNLHA64EX.*
+/sample/
+/Release/
+/*.bat

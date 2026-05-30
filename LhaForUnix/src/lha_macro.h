@@ -18,6 +18,20 @@
 # define kill(pid, sig)         0
 #endif
 
+#if defined _MSC_VER
+# include <io.h>
+# include <direct.h>
+# define getuid()       0
+# define chown(file, uid, gid)  0
+# define kill(pid, sig)         0
+# define isatty _isatty
+# define fileno _fileno
+# define unlink _unlink
+# define mkdir(path, mode) _mkdir(path)
+# define chmod _chmod
+# define strdup _strdup
+#endif
+
 #if defined __DJGPP__
 # define S_ISLNK(m)	0
 #endif
