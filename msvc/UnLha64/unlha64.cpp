@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include "UNLHA32.H"
 #include "UNLHA64EX.H"
 
@@ -14,6 +14,8 @@ extern "C" {
 }
 
 #include <shellapi.h>
+#include <ctype.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <setjmp.h>
@@ -114,6 +116,8 @@ extern "C" {
 }
 
 extern "C" void lha_exit_handler(int status) {
+    /* テンポラリファイルなどのリソースをクリーンアップ */
+    cleanup();
     g_lha_exit_status = status;
     if (g_lha_exit_jmp_enabled) {
         longjmp(g_lha_exit_jmp_buf, status == 0 ? -1 : status);
@@ -219,6 +223,71 @@ BOOL WINAPI UnlhaCheckArchiveW(LPCWSTR _szFileName, int _iMode) {
     return UnlhaCheckArchive(szFileNameA.c_str(), _iMode);
 }
 
+// 大文字小文字を無視して文字列比較するためのユーティリティ
+static bool iequals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (tolower(a[i]) != tolower(b[i])) return false;
+    }
+    return true;
+}
+
+static bool HasWildcard(const std::string& path) {
+    return path.find('*') != std::string::npos || path.find('?') != std::string::npos;
+}
+
+static void SplitPath(const std::string& fullPath, std::string& dir, std::string& pattern) {
+    size_t lastSlash = fullPath.find_last_of("\\/");
+    if (lastSlash == std::string::npos) {
+        dir = "";
+        pattern = fullPath;
+    } else {
+        dir = fullPath.substr(0, lastSlash + 1);
+        pattern = fullPath.substr(lastSlash + 1);
+    }
+}
+
+static void GlobRecursive(const std::string& baseDir, const std::string& searchPattern, std::vector<std::string>& results) {
+    std::string findPath = baseDir + searchPattern;
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(findPath.c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                results.push_back(baseDir + fd.cFileName);
+            }
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+
+    std::string subDirFind = baseDir + "*";
+    hFind = FindFirstFileA(subDirFind.c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (strcmp(fd.cFileName, ".") != 0 && strcmp(fd.cFileName, "..") != 0) {
+                    GlobRecursive(baseDir + fd.cFileName + "\\", searchPattern, results);
+                }
+            }
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+}
+
+static void GlobSingle(const std::string& baseDir, const std::string& searchPattern, std::vector<std::string>& results) {
+    std::string findPath = baseDir + searchPattern;
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(findPath.c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(fd.cFileName, ".") != 0 && strcmp(fd.cFileName, "..") != 0) {
+                results.push_back(baseDir + fd.cFileName);
+            }
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+}
+
 int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) {
     if (!_szCmdLine) return -1;
 
@@ -238,24 +307,19 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     g_running = true;
     g_last_error.clear();
 
-    // コマンドラインをargc/argvにパースする
-    std::string cmdLine = "lha "; // ダミーのプログラム名
-    cmdLine += _szCmdLine;
-
-    std::vector<char*> argv;
-    std::vector<char*> original_argv;
+    // コマンドラインをトークンに分解する（ダブルクォート考慮）
+    std::vector<std::string> raw_args;
     std::string current;
     bool inQuote = false;
-    
+    std::string cmdLine = _szCmdLine;
+
     for (size_t i = 0; i <= cmdLine.length(); ++i) {
         char c = (i < cmdLine.length()) ? cmdLine[i] : '\0';
         if (c == '\"') {
             inQuote = !inQuote;
         } else if ((c == ' ' || c == '\0') && !inQuote) {
             if (!current.empty()) {
-                char* arg = _strdup(current.c_str());
-                argv.push_back(arg);
-                original_argv.push_back(arg);
+                raw_args.push_back(current);
                 current.clear();
             }
         } else {
@@ -263,99 +327,323 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
         }
     }
 
-    argv.push_back(NULL); // 配列をNULLで終端する
-    int argc = (int)argv.size() - 1;
+    if (raw_args.empty()) {
+        g_capture_buffer = nullptr;
+        g_capture_buffer_size = 0;
+        g_capture_buffer_written = 0;
+        g_running = false;
+        return -1;
+    }
 
-    // ライブラリ関数を呼び出す
+    // パラメータ解析
+    char cmd_char = '\0';
+    std::vector<std::string> file_list;
+    std::vector<std::string> raw_switches;
+    std::string log_file_path = "";
+    std::vector<std::string> exclude_patterns;
+
+    // スイッチのデフォルト設定
+    // UNLHA32.DLL の初期設定: -d0 -r0 -x0 -jm2
+    bool is_d_specified = false;
+    bool is_d_val = false;
+    int recursive_mode = 0; // 0: -r0, 1: -r1, 2: -r2
+    bool is_x_specified = false;
+    bool is_x_val = false;
+    int jm_val = 2; // -jm2
+    bool is_y_val = false;
+
+    // コマンド（命令）とスイッチ、ファイルリストの分類
+    for (size_t i = 0; i < raw_args.size(); ++i) {
+        std::string arg = raw_args[i];
+        if (arg.empty()) continue;
+
+        if (arg[0] == '-' || arg[0] == '/') {
+            raw_switches.push_back(arg);
+        } else {
+            // スイッチでない引数
+            if (cmd_char == '\0') {
+                // 最初の非スイッチ引数が1文字（または2文字でオプション付きの可能性もあるが基本1文字）
+                // コマンド文字であるかを判定
+                if (arg.length() == 1 || (arg.length() == 2 && isalpha(arg[0]))) {
+                    char c = tolower(arg[0]);
+                    if (c == 'a' || c == 'c' || c == 'd' || c == 'e' || c == 'f' || c == 'j' || 
+                        c == 'l' || c == 'm' || c == 'n' || c == 'p' || c == 's' || c == 't' || 
+                        c == 'u' || c == 'v' || c == 'x') {
+                        cmd_char = c;
+                        continue;
+                    }
+                }
+                // コマンド文字が省略されているとみなして、デフォルトの 'l' とする
+                cmd_char = 'l';
+            }
+            file_list.push_back(arg);
+        }
+    }
+
+    if (cmd_char == '\0') {
+        cmd_char = 'l';
+    }
+
+    // スイッチの解析
+    for (const std::string& sw : raw_switches) {
+        if (sw.length() <= 1) continue;
+        std::string s = sw.substr(1); // 先頭の '-' または '/' を除く
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+
+        if (s.empty()) continue;
+
+        // 非対応スイッチで即時エラーとするもの
+        // j, jr, jw, gw, gj
+        if (s[0] == 'j') {
+            if (s.length() == 1) {
+                g_capture_buffer = nullptr;
+                g_capture_buffer_size = 0;
+                g_capture_buffer_written = 0;
+                g_running = false;
+                return 87; // ERROR_INVALID_PARAMETER
+            }
+            std::string sub = s.substr(0, 2);
+            if (sub == "w" || s.find("jw") == 0U || s.find("gw") == 0U || s.find("gj") == 0U || s.find("jr") == 0U) {
+                g_capture_buffer = nullptr;
+                g_capture_buffer_size = 0;
+                g_capture_buffer_written = 0;
+                g_running = false;
+                return 87; // ERROR_INVALID_PARAMETER
+            }
+        }
+        if (s.find("gw") == 0U) {
+            g_capture_buffer = nullptr;
+            g_capture_buffer_size = 0;
+            g_capture_buffer_written = 0;
+            g_running = false;
+            return 87;
+        }
+
+        // 個別対応スイッチのパース
+        if (s[0] == 'd') {
+            is_d_specified = true;
+            if (s.length() == 1 || s == "d1") {
+                is_d_val = true;
+            } else if (s == "d0") {
+                is_d_val = false;
+            }
+        } else if (s[0] == 'r') {
+            if (s == "r0") {
+                recursive_mode = 0;
+            } else if (s == "r1" || s == "r") {
+                recursive_mode = 1;
+            } else if (s == "r2") {
+                recursive_mode = 2;
+            }
+        } else if (s[0] == 'x') {
+            is_x_specified = true;
+            if (s == "x0") {
+                is_x_val = false;
+            } else if (s == "x1" || s == "x") {
+                is_x_val = true;
+            }
+        } else if (s.find("jm") == 0U) {
+            if (s.length() >= 3 && isdigit(s[2])) {
+                jm_val = s[2] - '0';
+            }
+        } else if (s.find("jx") == 0U) {
+            std::string pat = sw.substr(3); // 元の文字列から大文字小文字を維持して切り出す
+            if (!pat.empty()) {
+                exclude_patterns.push_back(pat);
+            }
+        } else if (s.find("gl") == 0U) {
+            log_file_path = sw.substr(3);
+        } else if (s[0] == 'y') {
+            is_y_val = true;
+        }
+    }
+
+    // スイッチ設定の適用
+    if (is_d_specified) {
+        if (is_d_val) {
+            recursive_mode = 2;
+            is_x_val = true;
+        } else {
+            recursive_mode = 0;
+            is_x_val = false;
+        }
+    }
+
+    // ライブラリの初期化
     lha_init_variable();
     Lha_ResetAbort();
     g_infp = NULL;
     g_outfp = NULL;
 
-    // e コマンドの場合はディレクトリを無視する（UNLHA32.DLL 互換）
-    if (argc >= 2) {
-        char* cmd_arg = argv[1];
-        if (cmd_arg && cmd_arg[0] == '-') cmd_arg++;
-        if (cmd_arg && *cmd_arg == 'e') {
+    // LhaCore のグローバル変数に適用
+    if (is_y_val) {
+        force = TRUE;
+    } else {
+        force = FALSE;
+    }
+
+    if (cmd_char == 'e') {
+        if (is_x_specified && is_x_val) {
+            ignore_directory = FALSE;
+        } else if (is_d_specified && is_d_val) {
+            ignore_directory = FALSE;
+        } else {
             ignore_directory = TRUE;
+        }
+    } else if (cmd_char == 'x') {
+        if (is_x_specified && !is_x_val) {
+            ignore_directory = TRUE;
+        } else if (is_d_specified && !is_d_val) {
+            ignore_directory = TRUE;
+        } else {
+            ignore_directory = FALSE;
         }
     }
 
-    // UNLHA32.DLL 互換レイヤー: e/x archive [抽出先/] [ファイル...]
-    // アーカイブ名の後の第2引数がディレクトリのように見えるか、または後続にファイルがある場合、
-    // それを展開先ディレクトリ (-w) として扱う。
-    // lha_init_variable() は extract_directory をリセットするため、必ずその後に呼び出すこと。
-    if (argc >= 3) {
-        char* cmd_arg = argv[1];
-        if (cmd_arg && cmd_arg[0] == '-') cmd_arg++;
-        if (cmd_arg && (*cmd_arg == 'e' || *cmd_arg == 'x')) {
-            int position = 0;
-            int dest_idx = -1;
-            for (int i = 2; i < argc; ++i) {
-                if (argv[i] && argv[i][0] != '-') {
-                    position++;
-                    if (position == 2) { // 2nd positional argument after command
-                        size_t len = strlen(argv[i]);
-                        // スラッシュで終わっているか、または後続の引数がある場合、この引数を展開先とみなす
-                        bool hasMorePosArgs = false;
-                        for (int j = i + 1; j < argc; ++j) {
-                            if (argv[j] && argv[j][0] != '-') {
-                                hasMorePosArgs = true;
-                                break;
-                            }
-                        }
-                        if (len > 0 && (argv[i][len-1] == '/' || argv[i][len-1] == '\\' || hasMorePosArgs)) {
-                            dest_idx = i;
-                        }
-                        break;
+    if (recursive_mode > 0) {
+        recursive_archiving = TRUE;
+    } else {
+        recursive_archiving = FALSE;
+    }
+
+    if (!is_x_val) {
+        generic_format = TRUE;
+    } else {
+        generic_format = FALSE;
+    }
+
+    switch (jm_val) {
+        case 0: compress_method = LZHUFF0_METHOD_NUM; break;
+        case 1: compress_method = LZHUFF1_METHOD_NUM; break;
+        case 2: compress_method = LZHUFF5_METHOD_NUM; break;
+        case 3: compress_method = LZHUFF6_METHOD_NUM; break;
+        case 4: compress_method = LZHUFF7_METHOD_NUM; break;
+        case 5: compress_method = LZHUFF2_METHOD_NUM; break;
+        case 6: compress_method = LZHUFF3_METHOD_NUM; break;
+        case 7: compress_method = LARC_METHOD_NUM; break;
+        case 8: compress_method = LARC5_METHOD_NUM; break;
+        default: compress_method = LZHUFF5_METHOD_NUM; break;
+    }
+
+    // 圧縮系コマンドの場合のみワイルドカードを展開する
+    std::vector<std::string> expanded_file_list;
+    bool is_compress_cmd = (cmd_char == 'a' || cmd_char == 'u' || cmd_char == 'm' || cmd_char == 'f' || cmd_char == 'c');
+
+    if (file_list.size() > 0) {
+        expanded_file_list.push_back(file_list[0]); // 書庫名は展開しない
+
+        for (size_t i = 1; i < file_list.size(); ++i) {
+            std::string path = file_list[i];
+            if (is_compress_cmd && HasWildcard(path)) {
+                std::string dir, pattern;
+                SplitPath(path, dir, pattern);
+                std::vector<std::string> matches;
+                if (recursive_mode >= 1) {
+                    GlobRecursive(dir, pattern, matches);
+                } else {
+                    GlobSingle(dir, pattern, matches);
+                }
+                if (matches.empty()) {
+                    expanded_file_list.push_back(path);
+                } else {
+                    for (const std::string& m : matches) {
+                        expanded_file_list.push_back(m);
                     }
                 }
-            }
-            if (dest_idx != -1) {
-                extract_directory = argv[dest_idx];
-                argv.erase(argv.begin() + dest_idx);
-                argc--;
+            } else {
+                expanded_file_list.push_back(path);
             }
         }
     }
 
     // UNIXベースのライブラリ向けにパスを正規化する（バックスラッシュをスラッシュに変換）
+    // また、引数リスト argv を再構成する
+    std::vector<std::string> final_argv_strs;
+    final_argv_strs.push_back("lha");
+    final_argv_strs.push_back(std::string(1, cmd_char));
+
+    // 除外パターンの追加 (-jx -> -x)
+    for (const std::string& pat : exclude_patterns) {
+        final_argv_strs.push_back("-x" + pat);
+    }
+
+    // 書庫名とファイルリストの追加
+    for (const std::string& f : expanded_file_list) {
+        final_argv_strs.push_back(f);
+    }
+
+    // UNLHA32.DLL 互換レイヤー: e/x archive [抽出先/] [ファイル...]
+    // アーカイブ名 (final_argv_strs[2 + exclude_patterns.size()]) の後の引数がディレクトリのように見えるかチェックし、
+    // 展開先ディレクトリ (-w) として扱う。
+    size_t archive_idx = 2 + exclude_patterns.size();
+    if (final_argv_strs.size() >= archive_idx + 2) {
+        if (cmd_char == 'e' || cmd_char == 'x') {
+            int position = 0;
+            int dest_idx = -1;
+            for (size_t i = archive_idx + 1; i < final_argv_strs.size(); ++i) {
+                position++;
+                if (position == 1) {
+                    size_t len = final_argv_strs[i].length();
+                    bool hasMorePosArgs = (i + 1 < final_argv_strs.size());
+                    if (len > 0U && (final_argv_strs[i][len-1] == '/' || final_argv_strs[i][len-1] == '\\' || hasMorePosArgs)) {
+                        dest_idx = (int)i;
+                    }
+                    break;
+                }
+            }
+            if (dest_idx != -1) {
+                // 静的にメモリ確保された文字列に複製して LhaCore の extract_directory に設定
+                char* dest_dir = _strdup(final_argv_strs[dest_idx].c_str());
+                extract_directory = dest_dir;
+                final_argv_strs.erase(final_argv_strs.begin() + dest_idx);
+            }
+        }
+    }
+
+    // パスの区切り文字を正規化
     if (extract_directory) {
         char* p = extract_directory;
         while (*p) {
             if (IsDBCSLeadByte((BYTE)*p)) {
-                p += 2;
+                if (*(p + 1)) p += 2;
+                else p++;
                 continue;
             }
             if (*p == '\\') *p = '/';
             p++;
         }
-        // 後でダブルスラッシュになるのを防ぐため、末尾のスラッシュを削除（ライブラリ自体が追加するため）
         size_t len = strlen(extract_directory);
-        if (len > 0 && extract_directory[len - 1] == '/') {
+        if (len > 0U && extract_directory[len - 1] == '/') {
             extract_directory[len - 1] = '\0';
         }
     }
-    // 引数のパスを正規化（バックスラッシュをスラッシュに変換）
-    for (int i = 0; i < argc; ++i) {
-        if (argv[i]) {
-            char* p = argv[i];
-            while (*p) {
-                if (IsDBCSLeadByte((BYTE)*p)) {
-                    if (*(p + 1)) p += 2;
-                    else p++;
-                    continue;
-                }
-                if (*p == '\\') *p = '/';
-                p++;
+
+    for (size_t i = 0; i < final_argv_strs.size(); ++i) {
+        for (size_t j = 0; j < final_argv_strs[i].length(); ++j) {
+            // SJISのマルチバイト文字に配慮しながらバックスラッシュをスラッシュに変換
+            if (IsDBCSLeadByte((BYTE)final_argv_strs[i][j])) {
+                if (j + 1U < final_argv_strs[i].length()) j++;
+                continue;
+            }
+            if (final_argv_strs[i][j] == '\\') {
+                final_argv_strs[i][j] = '/';
             }
         }
     }
 
+    // argv 配列（Cスタイル）を構築
+    std::vector<char*> argv;
+    std::vector<char*> original_argv;
+    for (const std::string& arg_str : final_argv_strs) {
+        char* arg = _strdup(arg_str.c_str());
+        argv.push_back(arg);
+        original_argv.push_back(arg);
+    }
+    argv.push_back(NULL);
+    int argc = (int)argv.size() - 1;
     char** argv_ptr = argv.data();
 
     int result = 0;
-
     g_lha_exit_jmp_enabled = 1;
     if (setjmp(g_lha_exit_jmp_buf) == 0) {
         if (lha_parse_option(argc, argv_ptr) == 0) {
@@ -369,6 +657,11 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     }
     g_lha_exit_jmp_enabled = 0;
 
+    // extract_directory 用に複製した領域のクリーンアップ
+    if (extract_directory) {
+        free(extract_directory);
+        extract_directory = nullptr;
+    }
 
     // 元のポインタを使用して安全にargvをクリーンアップする
     for (char* arg : original_argv) {
@@ -386,6 +679,15 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
             WideCharToMultiByte(CP_ACP, 0, g_last_error.c_str(), -1, &tempBuffer[0], size_needed, NULL, NULL);
             strncpy(_szOutput, tempBuffer.c_str(), _dwSize - 1);
             _szOutput[_dwSize - 1] = '\0';
+        }
+    }
+
+    // ログファイルの書き出し
+    if (!log_file_path.empty() && _szOutput && _dwSize > 0) {
+        FILE* fpLog = fopen(log_file_path.c_str(), "w");
+        if (fpLog) {
+            fputs(_szOutput, fpLog);
+            fclose(fpLog);
         }
     }
 
@@ -699,4 +1001,32 @@ BOOL WINAPI UnlhaSetOwnerWindowExTotal(HWND _hwnd, LPARCHIVERPROC _lpArcProcArg,
     return TRUE;
 }
 
+// Windows環境において、ディレクトリやファイルのタイムスタンプを設定するヘルパー関数
+// (Cコードから呼び出すためのCリンケージ)
+int win32_set_file_time(const char* name, time_t t) {
+    ULARGE_INTEGER ull;
+    ull.QuadPart = ((ULONGLONG)t * 10000000ULL) + 116444736000000000ULL;
+    
+    FILETIME ft;
+    ft.dwLowDateTime = ull.LowPart;
+    ft.dwHighDateTime = ull.HighPart;
+
+    // ディレクトリやファイルを開く (FILE_FLAG_BACKUP_SEMANTICS が必要)
+    HANDLE hFile = CreateFileA(name, 
+                               GENERIC_WRITE, 
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 
+                               NULL, 
+                               OPEN_EXISTING, 
+                               FILE_FLAG_BACKUP_SEMANTICS, 
+                               NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return 0; // 失敗
+    }
+
+    BOOL result = SetFileTime(hFile, NULL, &ft, &ft);
+    CloseHandle(hFile);
+    return result ? 1 : 0;
+}
+
 } // extern "C"
+

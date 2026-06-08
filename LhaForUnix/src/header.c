@@ -1471,6 +1471,14 @@ init_header(char *name, struct stat *v_stat, LzHeader *hdr)
         len = (int)strlen(hdr->name);
     }
 
+    if (generic_format) {
+        char *p = strrchr(hdr->name, '/');
+        if (p) {
+            memmove(hdr->name, p + 1, strlen(p + 1) + 1);
+            len = (int)strlen(hdr->name);
+        }
+    }
+
     hdr->crc = 0x0000;
     hdr->extend_type = EXTEND_UNIX;
     hdr->unix_last_modified_stamp = v_stat->st_mtime;

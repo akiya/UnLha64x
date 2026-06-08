@@ -20,3 +20,11 @@
 #define IDC_PROGRESS_ARC                        1014
 #define IDC_PROGRESS_TOTAL                      1015
 #define IDC_PROGRESS_ARC_TOTAL                  1016
+#define IDC_LBL_SW_EXT                          1017
+#define IDC_SW_EXT                              1018
+#define IDC_LBL_SW_ARC                          1019
+#define IDC_SW_ARC                              1020
+#define IDC_CHK_KEEP_DIR                        1021
+#define IDC_CHK_STORE_DIR                       1022
+
+

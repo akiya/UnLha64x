@@ -18,8 +18,11 @@ BEGIN
     LTEXT           "出力ディレクトリ:", IDC_LBL_OUTDIR, 12, 22, 60, 8
     EDITTEXT        IDC_OUTDIR, 75, 20, 260, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "参照...", IDC_BROWSE, 340, 20, 48, 14
-    CONTROL         "", IDC_FILELIST, "SysListView32", LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 12, 40, 376, 230
-    AUTOCHECKBOX    "同名ファイルを上書きする", IDC_CHK_OVERWRITE, 12, 275, 150, 10
+    CONTROL         "", IDC_FILELIST, "SysListView32", LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 12, 40, 376, 215
+    AUTOCHECKBOX    "ディレクトリ構造を再現(xコマンド)", IDC_CHK_KEEP_DIR, 12, 260, 150, 10
+    AUTOCHECKBOX    "同名ファイルを上書きする(-y)", IDC_CHK_OVERWRITE, 170, 260, 150, 10
+    LTEXT           "追加スイッチ:", IDC_LBL_SW_EXT, 12, 276, 50, 8
+    EDITTEXT        IDC_SW_EXT, 65, 273, 267, 14, ES_AUTOHSCROLL
     CONTROL         "", IDC_PROGRESS_TOTAL, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 290, 320, 14
     PUSHBUTTON      "解凍", IDC_EXTRACT, 340, 306, 48, 14
     CONTROL         "", IDC_PROGRESS, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 306, 320, 14
@@ -28,7 +31,10 @@ BEGIN
     LTEXT           "圧縮ファイル:", IDC_LBL_ARCOUT, 12, 22, 60, 8
     EDITTEXT        IDC_ARCOUT, 75, 20, 260, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "参照...", IDC_BROWSE_ARCOUT, 340, 20, 48, 14
-    CONTROL         "", IDC_FILELIST_ARC, "SysListView32", LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 12, 40, 376, 230
+    CONTROL         "", IDC_FILELIST_ARC, "SysListView32", LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 12, 40, 376, 215
+    AUTOCHECKBOX    "ディレクトリ内を格納(-d)", IDC_CHK_STORE_DIR, 12, 260, 150, 10
+    LTEXT           "追加スイッチ:", IDC_LBL_SW_ARC, 12, 276, 50, 8
+    EDITTEXT        IDC_SW_ARC, 65, 273, 267, 14, ES_AUTOHSCROLL
     CONTROL         "", IDC_PROGRESS_ARC_TOTAL, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 290, 320, 14
     PUSHBUTTON      "圧縮", IDC_COMPRESS, 340, 306, 48, 14
     CONTROL         "", IDC_PROGRESS_ARC, "msctls_progress32", PBS_SMOOTH | WS_BORDER, 12, 306, 320, 14
@@ -38,8 +44,8 @@ END
 // UnLha64Test バージョン情報定義 (BOM付きUTF-8, CRLF)
 //
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -54,14 +60,14 @@ BEGIN
     BEGIN
         BLOCK "041104b0" // 日本語 (Unicode)
         BEGIN
-            VALUE "CompanyName", "micosoft / akiya"
+            VALUE "CompanyName", "micosoft / akiya" // 'mico'softです
             VALUE "FileDescription", "UnLha64Test"
-            VALUE "FileVersion", "1.0.0.0"
+            VALUE "FileVersion", "1.1.0.0"
             VALUE "InternalName", "UnLha64Test"
             VALUE "LegalCopyright", "© 2026 micosoft / akiya"
             VALUE "OriginalFilename", "UnLha64Test.exe"
             VALUE "ProductName", "UnLha64Test"
-            VALUE "ProductVersion", "1.0.0.0"
+            VALUE "ProductVersion", "1.1.0.0"
         END
     END
     BLOCK "VarFileInfo"

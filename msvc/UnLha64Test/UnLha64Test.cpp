@@ -421,6 +421,12 @@ INT_PTR CALLBACK DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             pSetOwnerWindow(hwnd);
         }
 
+        // 解凍設定チェックボックスの初期値設定
+        SendDlgItemMessage(hwnd, IDC_CHK_KEEP_DIR, BM_SETCHECK, BST_CHECKED, 0);
+
+        // 圧縮設定チェックボックスの初期値設定
+        SendDlgItemMessage(hwnd, IDC_CHK_STORE_DIR, BM_SETCHECK, BST_CHECKED, 0);
+
         // プログレスバーの描画サブクラス化を設定
         SetWindowSubclass(GetDlgItem(hwnd, IDC_PROGRESS), ProgressSubclassProc, 0, 0);
         SetWindowSubclass(GetDlgItem(hwnd, IDC_PROGRESS_ARC), ProgressSubclassProc, 0, 0);
@@ -637,8 +643,29 @@ void UpdateFileList(HWND hwndList, const std::string& arcPath) {
  */
 void ExtractArchive(HWND hwnd, const std::string& arcPath, const std::string& outDir) {
     BOOL overwrite = SendDlgItemMessage(hwnd, IDC_CHK_OVERWRITE, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    BOOL keepDir = SendDlgItemMessage(hwnd, IDC_CHK_KEEP_DIR, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    char szSwExt[256] = { 0 };
+    GetDlgItemTextA(hwnd, IDC_SW_EXT, szSwExt, sizeof(szSwExt));
+    std::string swExt = szSwExt;
+
+    // 解凍コマンドの決定 (x / e)
+    std::string baseCmd = keepDir ? "x" : "e";
+
+    // オリジナルの仕様に合わせて、上書き時には '-y' スイッチを付加するように調整
+    std::string switches = swExt;
+    if (overwrite) {
+        if (!switches.empty()) {
+            switches += " ";
+        }
+        switches += "-y";
+    }
+
     // 解凍コマンドの構築
-    std::string cmd = (overwrite ? "xf" : "x") + std::string(" \"") + arcPath + "\" \"" + outDir + "\\\"";
+    std::string cmd = baseCmd;
+    if (!switches.empty()) {
+        cmd += " " + switches;
+    }
+    cmd += " \"" + arcPath + "\" \"" + outDir + "\\\"";
     
     // 状態の初期化
     g_extracting = true;
@@ -678,10 +705,17 @@ void ExtractArchive(HWND hwnd, const std::string& arcPath, const std::string& ou
         g_progressPercentExt = -1; g_progressTotalPercentExt = -1; g_currentFileNameExt = "";
         UpdateProgressDisplay(hwnd, 0, IDC_PROGRESS);
         UpdateProgressDisplay(hwnd, 0, IDC_PROGRESS_TOTAL);
-        char buf[1024];
-        if (szOutput[0] != '\0') sprintf_s(buf, "エラーが発生しました。\n%s\n(コード: 0x%X)", szOutput, result);
-        else sprintf_s(buf, "エラーが発生しました。\nコード: 0x%X", result);
-        MessageBoxA(hwnd, buf, "エラー", MB_ICONERROR);
+        wchar_t wszOutput[1024] = { 0 };
+        if (szOutput[0] != '\0') {
+            MultiByteToWideChar(CP_ACP, 0, szOutput, -1, wszOutput, 1024);
+        }
+        wchar_t buf[2048];
+        if (wszOutput[0] != L'\0') {
+            swprintf_s(buf, L"エラーが発生しました。\n%s\n(コード: 0x%X)", wszOutput, result);
+        } else {
+            swprintf_s(buf, L"エラーが発生しました。\nコード: 0x%X", result);
+        }
+        MessageBoxW(hwnd, buf, L"エラー", MB_ICONERROR);
     }
 }
 
@@ -697,7 +731,10 @@ void UpdateTabUI(HWND hwnd) {
     ShowWindow(GetDlgItem(hwnd, IDC_OUTDIR), sE);
     ShowWindow(GetDlgItem(hwnd, IDC_BROWSE), sE);
     ShowWindow(GetDlgItem(hwnd, IDC_FILELIST), sE);
+    ShowWindow(GetDlgItem(hwnd, IDC_CHK_KEEP_DIR), sE);
     ShowWindow(GetDlgItem(hwnd, IDC_CHK_OVERWRITE), sE);
+    ShowWindow(GetDlgItem(hwnd, IDC_LBL_SW_EXT), sE);
+    ShowWindow(GetDlgItem(hwnd, IDC_SW_EXT), sE);
     ShowWindow(GetDlgItem(hwnd, IDC_EXTRACT), sE);
     ShowWindow(GetDlgItem(hwnd, IDC_PROGRESS), sE);
     ShowWindow(GetDlgItem(hwnd, IDC_PROGRESS_TOTAL), sE);
@@ -707,6 +744,9 @@ void UpdateTabUI(HWND hwnd) {
     ShowWindow(GetDlgItem(hwnd, IDC_ARCOUT), sA);
     ShowWindow(GetDlgItem(hwnd, IDC_BROWSE_ARCOUT), sA);
     ShowWindow(GetDlgItem(hwnd, IDC_FILELIST_ARC), sA);
+    ShowWindow(GetDlgItem(hwnd, IDC_CHK_STORE_DIR), sA);
+    ShowWindow(GetDlgItem(hwnd, IDC_LBL_SW_ARC), sA);
+    ShowWindow(GetDlgItem(hwnd, IDC_SW_ARC), sA);
     ShowWindow(GetDlgItem(hwnd, IDC_COMPRESS), sA);
     ShowWindow(GetDlgItem(hwnd, IDC_PROGRESS_ARC), sA);
     ShowWindow(GetDlgItem(hwnd, IDC_PROGRESS_ARC_TOTAL), sA);
@@ -716,8 +756,26 @@ void UpdateTabUI(HWND hwnd) {
  * 指定されたファイルを圧縮する
  */
 void CompressArchive(HWND hwnd, const std::string& arcPath) {
+    BOOL storeDir = SendDlgItemMessage(hwnd, IDC_CHK_STORE_DIR, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    char szSwArc[256] = { 0 };
+    GetDlgItemTextA(hwnd, IDC_SW_ARC, szSwArc, sizeof(szSwArc));
+    std::string swArc = szSwArc;
+
+    // スイッチの調整
+    std::string switches = swArc;
+    if (storeDir) {
+        if (!switches.empty()) {
+            switches += " ";
+        }
+        switches += "-d";
+    }
+
     // 圧縮コマンドの構築
-    std::string cmd = "a \"" + arcPath + "\"";
+    std::string cmd = "a";
+    if (!switches.empty()) {
+        cmd += " " + switches;
+    }
+    cmd += " \"" + arcPath + "\"";
     for (size_t i = 0; i < g_arcFiles.size(); ++i) cmd += " \"" + g_arcFiles[i] + "\"";
     
     // 状態の初期化
@@ -761,9 +819,16 @@ void CompressArchive(HWND hwnd, const std::string& arcPath) {
         g_progressPercentArc = -1; g_progressTotalPercentArc = -1; g_currentFileNameArc = "";
         UpdateProgressDisplay(hwnd, 0, IDC_PROGRESS_ARC);
         UpdateProgressDisplay(hwnd, 0, IDC_PROGRESS_ARC_TOTAL);
-        char buf[1024];
-        if (szOutput[0] != '\0') sprintf_s(buf, "エラーが発生しました。\n%s\n(コード: 0x%X)", szOutput, result);
-        else sprintf_s(buf, "エラーが発生しました。\nコード: 0x%X", result);
-        MessageBoxA(hwnd, buf, "エラー", MB_ICONERROR);
+        wchar_t wszOutput[1024] = { 0 };
+        if (szOutput[0] != '\0') {
+            MultiByteToWideChar(CP_ACP, 0, szOutput, -1, wszOutput, 1024);
+        }
+        wchar_t buf[2048];
+        if (wszOutput[0] != L'\0') {
+            swprintf_s(buf, L"エラーが発生しました。\n%s\n(コード: 0x%X)", wszOutput, result);
+        } else {
+            swprintf_s(buf, L"エラーが発生しました。\nコード: 0x%X", result);
+        }
+        MessageBoxW(hwnd, buf, L"エラー", MB_ICONERROR);
     }
 }

@@ -54,6 +54,10 @@ inquire_extract(char *name)
             fatal_error("同名ファイルがあるので書き込めません。\n%s\n", name);
             return FALSE;
         }
+        else {
+            // 既存ファイルが読み取り専用（ReadOnly）の場合に備え、書き込み権限（0666）を与えて上書き可能にする
+            chmod(name, 0666);
+        }
     }
 
     if (noexec)
@@ -195,7 +199,14 @@ symlink_with_make_path(const char *realname, const char *name)
 static void
 adjust_info(char *name, LzHeader *hdr)
 {
-#if HAVE_UTIMES
+#if defined(_WIN32)
+    /* Windows環境ではutime/utimesがディレクトリのタイムスタンプを変更できないため、 */
+    /* CreateFileとSetFileTimeを使用してタイムスタンプを復元する */
+    if ((hdr->unix_mode & UNIX_FILE_TYPEMASK) != UNIX_FILE_SYMLINK) {
+        extern int win32_set_file_time(const char *name, time_t t);
+        win32_set_file_time(name, hdr->unix_last_modified_stamp);
+    }
+#elif HAVE_UTIMES
     struct timeval timevals[2];
 
     /* adjust file stamp */

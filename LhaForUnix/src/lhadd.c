@@ -656,6 +656,15 @@ cmd_add()
             new_archive_size = tmp;
 
         fclose(nafp);
+        /* 二重クローズを防止するため、ファイルディスクリプタ変数をリセット */
+        temporary_fd = -1;
+    }
+
+    /* 圧縮結果が空（終端マークのみの1バイト以下）の場合、エラーとする */
+    if (!noexec && new_archive_size <= 1) {
+        unlink(temporary_name);
+        error("No files archived.");
+        lha_exit(1);
     }
 
     /* build backup archive file */
