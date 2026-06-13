@@ -105,17 +105,25 @@ int Lha_SendProgressMessage(int state, const char* filename, __int64 current_siz
             MultiByteToWideChar(932, 0, name_to_use, -1, pi_ex.szDestFileName, FNAME_MAX32);
         }
 
-        int result = 0;
+        int abort = 0;
         if (proc) {
-            result = (int)proc(hwnd, msg_ex, (UINT)state, (LPVOID)&pi_ex);
+            /* コールバック関数の場合は TRUE が継続、FALSE が中断 */
+            BOOL ret = proc(hwnd, msg_ex, (UINT)state, (LPVOID)&pi_ex);
+            if (!ret) {
+                abort = 1;
+            }
         } else if (hwnd != NULL) {
-            result = (int)SendMessageA(hwnd, msg_ex, (WPARAM)state, (LPARAM)&pi_ex);
+            /* メッセージ送信の場合は 0 が継続、非ゼロが中断 */
+            LRESULT ret = SendMessageA(hwnd, msg_ex, (WPARAM)state, (LPARAM)&pi_ex);
+            if (ret != 0) {
+                abort = 1;
+            }
         }
 
-        if (result != 0) {
+        if (abort) {
             g_lha_aborted = 1;
         }
-        return result;
+        return abort;
     }
 
     /* 3. 従来のプログレス（wm_arcextract）での通知 */
@@ -138,15 +146,23 @@ int Lha_SendProgressMessage(int state, const char* filename, __int64 current_siz
         strncpy(pi.szSourceFileName, g_last_filename, 512);
     }
 
-    int result = 0;
+    int abort = 0;
     if (proc) {
-        result = (int)proc(hwnd, msg, (UINT)state, (LPVOID)&pi);
+        /* コールバック関数の場合は TRUE が継続、FALSE が中断 */
+        BOOL ret = proc(hwnd, msg, (UINT)state, (LPVOID)&pi);
+        if (!ret) {
+            abort = 1;
+        }
     } else if (hwnd != NULL) {
-        result = (int)SendMessageA(hwnd, msg, (WPARAM)state, (LPARAM)&pi);
+        /* メッセージ送信の場合は 0 が継続、非ゼロが中断 */
+        LRESULT ret = SendMessageA(hwnd, msg, (WPARAM)state, (LPARAM)&pi);
+        if (ret != 0) {
+            abort = 1;
+        }
     }
 
-    if (result != 0) {
+    if (abort) {
         g_lha_aborted = 1;
     }
-    return result;
+    return abort;
 }

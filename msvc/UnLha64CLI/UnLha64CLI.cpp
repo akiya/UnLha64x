@@ -1,8 +1,11 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <iostream>
 #include <string>
 #include <vector>
 #include "../../Header/UNLHA32.H"
+
+#pragma comment(lib, "version.lib")
+
 
 // DLL 関数の型定義
 typedef int (WINAPI* UnlhaPtr)(HWND, LPCSTR, LPSTR, DWORD);
@@ -35,6 +38,39 @@ static void ConsolePrint(const std::string& str, bool isError = false, bool isUt
         }
     }
 }
+
+/**
+ * 実行ファイル (UnLha64CLI.exe) のバージョン情報をリソースから取得する
+ */
+static WORD GetCliVersion() {
+    wchar_t szPath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, szPath, MAX_PATH) == 0) {
+        return 100; // 取得できない場合のフォールバック値 (v1.00)
+    }
+
+    DWORD dwHandle = 0;
+    DWORD dwSize = GetFileVersionInfoSizeW(szPath, &dwHandle);
+    if (dwSize == 0) {
+        return 100;
+    }
+
+    std::vector<BYTE> buffer(dwSize);
+    if (!GetFileVersionInfoW(szPath, dwHandle, dwSize, buffer.data())) {
+        return 100;
+    }
+
+    VS_FIXEDFILEINFO* pFileInfo = nullptr;
+    UINT uLen = 0;
+    if (!VerQueryValueW(buffer.data(), L"\\", (LPVOID*)&pFileInfo, &uLen) || pFileInfo == nullptr) {
+        return 100;
+    }
+
+    WORD major = HIWORD(pFileInfo->dwFileVersionMS);
+    WORD minor = LOWORD(pFileInfo->dwFileVersionMS);
+
+    return (major * 100) + minor;
+}
+
 
 /**
  * UnLha64CLI: UnLha64x.dll 動作確認用コマンドラインツール
@@ -84,10 +120,11 @@ int main(int argc, char* argv[]) {
 
     // 引数がない場合はヘルプを表示
     if (argc < 2) {
-        WORD ver = pGetVersion();
+        WORD dllVer = pGetVersion();
+        WORD cliVer = GetCliVersion();
         char buf[256];
         if (isJapanese) {
-            sprintf_s(buf, "UnLha64CLI version 1.0.0 (using UnLha64x.dll v%d.%02d)\n", (ver / 100), (ver % 100));
+            sprintf_s(buf, "UnLha64CLI version %d.%02d (using UnLha64x.dll v%d.%02d)\n", (cliVer / 100), (cliVer % 100), (dllVer / 100), (dllVer % 100));
             ConsolePrint(buf);
             ConsolePrint("使用法: UnLha64CLI <command> [options] <archive> [files...]\n");
             ConsolePrint("\n主要なコマンド:\n");
@@ -97,7 +134,7 @@ int main(int argc, char* argv[]) {
             ConsolePrint("  a <arc> <files...> : ファイルをアーカイブに追加/作成\n");
             ConsolePrint("  d <arc> <files...> : アーカイブからファイルを削除\n");
         } else {
-            sprintf_s(buf, "UnLha64CLI version 1.0.0 (using UnLha64x.dll v%d.%02d)\n", (ver / 100), (ver % 100));
+            sprintf_s(buf, "UnLha64CLI version %d.%02d (using UnLha64x.dll v%d.%02d)\n", (cliVer / 100), (cliVer % 100), (dllVer / 100), (dllVer % 100));
             ConsolePrint(buf);
             ConsolePrint("Usage: UnLha64CLI <command> [options] <archive> [files...]\n");
             ConsolePrint("\nCommands:\n");

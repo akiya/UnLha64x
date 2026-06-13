@@ -1,4 +1,4 @@
-# UnLha64x.dll
+﻿# UnLha64x.dll
 
 UnLha64x.dll は、Windows (x64) 環境で LZH 形式の書庫を操作するためのアーカイバライブラリです。  
 **UNLHA32.DLL** の 64 ビット版互換(機能縮小版)ライブラリとして作成されています。  
@@ -35,9 +35,8 @@ GitHubのページの右側にある **Releases** セクションから最新版
 
 ## 変更履歴
 
-### Ver.1.01
-- 不足していた詳細な [スイッチ](Switches.md) を実装 (一部未対応/無視しているものもあります)。  
-この変更により、一部デフォルトの動作が変わっている場合があるのでご注意ください。  
+### Ver. 1.02
+- `UnlhaSetOwnerWindowEx()`、`UnlhaSetOwnerWindowExTotal()` で指定したコールバックの返り値の扱いが間違っていたのを修正。  
 
 過去の変更履歴は [こちら](History.md) を参照してください。
 
@@ -86,7 +85,7 @@ GitHubのページの右側にある **Releases** セクションから最新版
 
 `UnlhaSetOwnerWindowExTotal` で `_bEnableTotalProgress = TRUE` を指定した場合、処理前に自動的に事前スキャンが行われ、個別ファイルの進捗に加えて書庫全体の進捗情報が得られます。
 
-- **メッセージ**: `RegisterWindowMessage("wm_arcextract_ex")` で取得したメッセージ ID が送信されます。
+- **メッセージ / コールバック**: `RegisterWindowMessage("wm_arcextract_ex")` で取得したメッセージ ID がウィンドウへ送信されるか、または設定したコールバック関数のメッセージID引数として渡されます。
 - **構造体**: `EXTRACTINGINFO_TOTAL` を通じて、処理中個別ファイル名やサイズのほか、処理対象の全ファイル合計サイズ (`llTotalBytes`)、累積処理済みサイズ (`llTotalProcessed`)、合計ファイル数 (`dwTotalFiles`)、処理済みファイル数 (`dwFilesProcessed`) などが通知されます。
 
 ※拡張全体進捗通知の仕様や各構造体メンバーの詳細については、[Header/UNLHA64EX.TXT](Header/UNLHA64EX.TXT) を参照してください。
@@ -106,10 +105,13 @@ GitHubのページの右側にある **Releases** セクションから最新版
   - 絶対パスを維持して格納したい場合は、 `--enable-absolute-path` オプションを指定してください(非推奨)
 
 ### Unicode API と文字コード変換
-本ライブラリは Unicode 版 API (`W` 系関数) をサポートしていますが、LZH ファイルのヘッダフォーマット仕様上、アーカイブ内部のファイル名は **Shift-JIS** として扱われます。
 
-- **引数の変換**: `UnlhaW` 等の Unicode 版 API に渡された文字列 (UTF-16) は、DLL 内部で自動的に Shift-JIS (CP_ACP) に変換されてから処理されます。また、ファイル情報を取得する構造体 (`INDIVIDUALINFOW`) へは Shift-JIS から UTF-16 への変換が行われます。
-- **代替文字によるフォールバック**: 圧縮対象のファイル名に Shift-JIS で表現できない Unicode 固有文字（ハングルや環境依存文字など）が含まれている場合、文字化けやファイル作成エラーを防ぐため、内部で該当文字を `_`（アンダースコア）に置換して処理・記録します。
+**UnLha64x では LZH 書庫内のファイル名について Unicode に対応していません。**  
+`UnlhaW` や `UnlhaOpenArchiveW` などの Unicode 版 API（`W` 系関数）を使用した場合でも、内部ではすべて **Shift-JIS** として扱われます。
+
+- **引数の変換**: `W` 系 API に渡された文字列 (UTF-16) は、DLL 内部で自動的に Shift-JIS (CP_ACP) に変換されてから処理されます。また、ファイル情報を取得する構造体 (`INDIVIDUALINFOW`) などへファイル情報を返す際は、内部の Shift-JIS 文字列から UTF-16 への変換が行われます。
+- **Unicode 固有文字のフォールバック**: 圧縮対象のファイル名に Shift-JIS で表現できない Unicode 固有文字（ハングル、絵文字、一部の環境依存文字など）が含まれている場合、文字化けやエラーを防ぐため、内部で該当文字を `_`（アンダースコア）に置換して処理・記録します。
+- **拡張ヘッダの非対応**: オリジナルの UNLHA32.DLL (Ver. 2.39a以降) に存在する Unicode ファイル名拡張ヘッダ (0x44) および Unicode ディレクトリ名拡張ヘッダ (0x45) には対応していません。
 
 ### DLLとしての安全性（リエントラント性とエラーハンドリング）
 オリジナルの LHa for UNIX はコマンドラインツールとして設計されていたため、グローバル変数の使用や、致命的なエラー時に `exit()` を呼び出してプロセスを強制終了する動作が含まれていました。  
