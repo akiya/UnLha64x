@@ -1,22 +1,36 @@
-LIBRARY UNLHA64X
 EXPORTS
     Unlha                  @1
     UnlhaW                 @81
     UnlhaGetVersion        @2
     UnlhaGetRunning        @3
     UnlhaCheckArchive      @4
+    UnlhaCheckArchiveA = UnlhaCheckArchive     @311
     UnlhaCheckArchiveW     @84
     UnlhaConfigDialog      @5
     UnlhaGetFileCount      @6
+    UnlhaGetFileCountA = UnlhaGetFileCount     @317
     UnlhaQueryFunctionList @7
+    UnlhaGetLastError      @20
+    UnlhaGetFileName = UnlhaGetFileNameA       @40
+    UnlhaGetFileNameA      @57
+    UnlhaGetFileNameW      @187
+    UnlhaGetOriginalSize   @58
+    UnlhaGetOriginalSizeEx @85
+    UnlhaGetDate           @61
+    UnlhaGetTime           @62
+    UnlhaGetAttribute      @64
     UnlhaOpenArchive       @100
+    UnlhaOpenArchiveA = UnlhaOpenArchive       @321
     UnlhaOpenArchiveW      @180
     UnlhaCloseArchive      @101
     UnlhaFindFirst         @102
+    UnlhaFindFirstA = UnlhaFindFirst           @323
     UnlhaFindFirstW        @182
     UnlhaFindNext          @103
+    UnlhaFindNextA = UnlhaFindNext             @324
     UnlhaFindNextW         @183
     UnlhaGetArcFileName    @104
+    UnlhaGetArcFileNameA = UnlhaGetArcFileName @331
     UnlhaGetArcFileNameW   @184
     UnlhaGetArcFileSize    @105
     UnlhaGetArcFileSizeEx  @106

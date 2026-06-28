@@ -17,6 +17,22 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 
+#ifdef _WIN64
+#define TARGET_DLL_NAME "UnLha64x.dll"
+#define DLL_DEBUG_PATH "../bin/Debug/UnLha64x.dll"
+#define DLL_RELEASE_PATH "../bin/Release/UnLha64x.dll"
+#define TARGET_DLL_NAME_W L"UnLha64x.dll"
+#define FALLBACK_DLL_NAME "UNLHA64.DLL"
+#define FALLBACK_DLL_NAME_W L"UNLHA64.DLL"
+#else
+#define TARGET_DLL_NAME "UnLha32x.dll"
+#define DLL_DEBUG_PATH "../bin/Win32/Debug/UnLha32x.dll"
+#define DLL_RELEASE_PATH "../bin/Win32/Release/UnLha32x.dll"
+#define TARGET_DLL_NAME_W L"UnLha32x.dll"
+#define FALLBACK_DLL_NAME "UNLHA32.DLL"
+#define FALLBACK_DLL_NAME_W L"UNLHA32.DLL"
+#endif
+
 // DLL 関数の型定義: UnLha64x.dll の API に準拠
 typedef int (WINAPI* UnlhaPtr)(HWND, LPCSTR, LPSTR, DWORD);
 typedef WORD (WINAPI* UnlhaGetVersionPtr)(void);
@@ -26,8 +42,10 @@ typedef int (WINAPI* UnlhaFindFirstPtr)(HARC, LPCSTR, INDIVIDUALINFO*);
 typedef int (WINAPI* UnlhaFindNextPtr)(HARC, INDIVIDUALINFO*);
 typedef int (WINAPI* UnlhaSetOwnerWindowPtr)(HWND);
 typedef BOOL (WINAPI* UnlhaSetOwnerWindowExTotalPtr)(HWND, LPARCHIVERPROC, BOOL);
+typedef BOOL (WINAPI* UnlhaCheckArchivePtr)(LPCSTR, int);
 
-// グローバル変数: DLL 関連の関数ポインタ
+// グローバル変数: DLL 関連 of 関数ポインタ
+std::wstring g_loadedDllNameW = L"";
 HMODULE g_hLib = NULL;
 UnlhaPtr pUnlha = NULL;
 UnlhaGetVersionPtr pGetVersion = NULL;
@@ -37,6 +55,7 @@ UnlhaFindFirstPtr pFindFirst = NULL;
 UnlhaFindNextPtr pFindNext = NULL;
 UnlhaSetOwnerWindowPtr pSetOwnerWindow = NULL;
 UnlhaSetOwnerWindowExTotalPtr pSetOwnerWindowExTotal = NULL;
+UnlhaCheckArchivePtr pCheckArchive = NULL;
 
 // グローバル変数: アプリケーション状態管理
 UINT g_wm_arcextract = 0;              // DLL から送られてくるプログレス通知メッセージ ID
@@ -77,7 +96,10 @@ int CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lParam, LPARAM lpDa
  * アーカイブ内の全ファイルの合計サイズを取得する（全体進捗計算用）
  */
 __int64 GetArchiveTotalSize(const std::string& arcFile) {
-    if (!pOpen || !pFindFirst || !pFindNext || !pClose) return 0;
+    if (!pOpen || !pFindFirst || !pFindNext || !pClose || !pCheckArchive) return 0;
+    // アーカイブファイルを開く前にチェックする
+    if (!pCheckArchive(arcFile.c_str(), 0)) return 0;
+
     HARC harc = pOpen(NULL, arcFile.c_str(), 0);
     if (!harc) return 0;
     __int64 total = 0;
@@ -258,17 +280,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
  * UnLha64x.dll のロードと関数ポインタの初期化
  */
 bool InitUnLhaDLL() {
-    g_hLib = LoadLibraryA("UnLha64x.dll");
-    if (!g_hLib) {
+    g_hLib = LoadLibraryA(TARGET_DLL_NAME);
+    if (g_hLib) {
+        g_loadedDllNameW = TARGET_DLL_NAME_W;
+    } else {
         // カレントディレクトリにない場合はビルド出力先を探索
 #ifdef _DEBUG
-        g_hLib = LoadLibraryA("../bin/Debug/UnLha64x.dll");
+        g_hLib = LoadLibraryA(DLL_DEBUG_PATH);
 #else
-        g_hLib = LoadLibraryA("../bin/Release/UnLha64x.dll");
+        g_hLib = LoadLibraryA(DLL_RELEASE_PATH);
 #endif
+        if (g_hLib) {
+            g_loadedDllNameW = TARGET_DLL_NAME_W;
+        }
     }
     if (!g_hLib) {
-        MessageBoxW(NULL, L"UnLha64x.dll が見つかりません。", L"Error", MB_ICONERROR);
+        // フォールバック DLL を探索
+        g_hLib = LoadLibraryA(FALLBACK_DLL_NAME);
+        if (g_hLib) {
+            g_loadedDllNameW = FALLBACK_DLL_NAME_W;
+        }
+    }
+    if (!g_hLib) {
+        wchar_t buf[256];
+        swprintf_s(buf, L"%s または %s が見つかりません。", TARGET_DLL_NAME_W, FALLBACK_DLL_NAME_W);
+        MessageBoxW(NULL, buf, L"Error", MB_ICONERROR);
         return false;
     }
 
@@ -281,8 +317,9 @@ bool InitUnLhaDLL() {
     pFindNext = (UnlhaFindNextPtr)GetProcAddress(g_hLib, "UnlhaFindNext");
     pSetOwnerWindow = (UnlhaSetOwnerWindowPtr)GetProcAddress(g_hLib, "UnlhaSetOwnerWindow");
     pSetOwnerWindowExTotal = (UnlhaSetOwnerWindowExTotalPtr)GetProcAddress(g_hLib, "UnlhaSetOwnerWindowExTotal");
+    pCheckArchive = (UnlhaCheckArchivePtr)GetProcAddress(g_hLib, "UnlhaCheckArchive");
 
-    if (!pUnlha || !pOpen || !pFindFirst) {
+    if (!pUnlha || !pOpen || !pFindFirst || !pCheckArchive) {
         MessageBoxW(NULL, L"DLL の必須関数が見つかりません。", L"Error", MB_ICONERROR);
         FreeLibrary(g_hLib);
         return false;
@@ -381,6 +418,14 @@ INT_PTR CALLBACK DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_INITDIALOG: {
         DragAcceptFiles(hwnd, TRUE); // ファイルドロップの有効化
         
+        // タイトルバーにロードされた DLL 名を表示
+        wchar_t szTitle[256];
+        if (GetWindowTextW(hwnd, szTitle, 256) > 0) {
+            std::wstring title = szTitle;
+            title += L" (" + g_loadedDllNameW + L")";
+            SetWindowTextW(hwnd, title.c_str());
+        }
+
         // タブコントロールの初期化
         HWND hwndTab = GetDlgItem(hwnd, IDC_TAB);
         TCITEMW tiew = { 0 }; tiew.mask = TCIF_TEXT;
@@ -613,6 +658,11 @@ INT_PTR CALLBACK DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
  */
 void UpdateFileList(HWND hwndList, const std::string& arcPath) {
     ListView_DeleteAllItems(hwndList);
+    // アーカイブファイルを開く前にチェックする
+    if (!pCheckArchive || !pCheckArchive(arcPath.c_str(), 0)) {
+        MessageBoxW(GetParent(hwndList), L"指定されたファイルは正しいアーカイブファイルではありません。", L"エラー", MB_ICONERROR);
+        return;
+    }
     HARC hArc = pOpen(hwndList, arcPath.c_str(), 0);
     if (!hArc) {
         MessageBoxW(GetParent(hwndList), L"アーカイブを開けませんでした。", L"エラー", MB_ICONERROR);
@@ -776,6 +826,13 @@ void CompressArchive(HWND hwnd, const std::string& arcPath) {
         cmd += " " + switches;
     }
     cmd += " \"" + arcPath + "\"";
+    if (!g_arcBaseDir.empty()) {
+        std::string baseDir = g_arcBaseDir;
+        if (baseDir.back() != '\\' && baseDir.back() != '/') {
+            baseDir += "\\";
+        }
+        cmd += " \"" + baseDir + "\"";
+    }
     for (size_t i = 0; i < g_arcFiles.size(); ++i) cmd += " \"" + g_arcFiles[i] + "\"";
     
     // 状態の初期化
@@ -783,9 +840,6 @@ void CompressArchive(HWND hwnd, const std::string& arcPath) {
     g_cancelRequested = false;
     SetDlgItemTextW(hwnd, IDC_COMPRESS, L"キャンセル");
     EnableWindow(GetDlgItem(hwnd, IDC_BROWSE_ARCOUT), FALSE);
-    
-    // 圧縮対象ファイルのベースディレクトリへ移動（DLL 内での相対パス維持のため）
-    SetCurrentDirectoryA(g_arcBaseDir.c_str());
     
     g_progressPercentArc = -1; g_progressTotalPercentArc = -1; g_currentFileNameArc = "";
     UpdateProgressDisplay(hwnd, 0, IDC_PROGRESS_ARC);

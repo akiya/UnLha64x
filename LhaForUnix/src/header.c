@@ -1462,6 +1462,9 @@ init_header(char *name, struct stat *v_stat, LzHeader *hdr)
     hdr->packed_size = 0;
     hdr->original_size = v_stat->st_size;
     hdr->attribute = GENERIC_ATTRIBUTE;
+    if (!(v_stat->st_mode & 0200)) {
+        hdr->attribute |= 0x01;
+    }
     hdr->header_level = header_level;
 
     len = (int)canon_path(hdr->name, name, sizeof(hdr->name));
@@ -1549,7 +1552,8 @@ init_header(char *name, struct stat *v_stat, LzHeader *hdr)
 #endif /* INCLUDE_OWNER_NAME_IN_HEADER */
     if (is_directory(v_stat)) {
         memcpy(hdr->method, LZHDIRS_METHOD, METHOD_TYPE_STORAGE);
-        hdr->attribute = GENERIC_DIRECTORY_ATTRIBUTE;
+        hdr->attribute &= ~GENERIC_ATTRIBUTE;
+        hdr->attribute |= GENERIC_DIRECTORY_ATTRIBUTE;
         hdr->original_size = 0;
         if (len > 0 && hdr->name[len - 1] != '/') {
             if (len < sizeof(hdr->name)-1)
@@ -1563,7 +1567,8 @@ init_header(char *name, struct stat *v_stat, LzHeader *hdr)
 #ifdef S_IFLNK
     if (is_symlink(v_stat)) {
         memcpy(hdr->method, LZHDIRS_METHOD, METHOD_TYPE_STORAGE);
-        hdr->attribute = GENERIC_DIRECTORY_ATTRIBUTE;
+        hdr->attribute &= ~GENERIC_ATTRIBUTE;
+        hdr->attribute |= GENERIC_DIRECTORY_ATTRIBUTE;
         hdr->original_size = 0;
         readlink(name, hdr->realname, sizeof(hdr->realname));
     }

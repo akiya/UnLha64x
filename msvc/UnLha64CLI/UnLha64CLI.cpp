@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -6,6 +6,20 @@
 
 #pragma comment(lib, "version.lib")
 
+
+#ifdef _WIN64
+#define TARGET_DLL_NAME "UnLha64x.dll"
+#define DLL_DEBUG_PATH "../bin/Debug/UnLha64x.dll"
+#define DLL_RELEASE_PATH "../bin/Release/UnLha64x.dll"
+#define CLI_TOOL_NAME "UnLha64CLI"
+#define FALLBACK_DLL_NAME "UNLHA64.DLL"
+#else
+#define TARGET_DLL_NAME "UnLha32x.dll"
+#define DLL_DEBUG_PATH "../bin/Win32/Debug/UnLha32x.dll"
+#define DLL_RELEASE_PATH "../bin/Win32/Release/UnLha32x.dll"
+#define CLI_TOOL_NAME "UnLha32CLI"
+#define FALLBACK_DLL_NAME "UNLHA32.DLL"
+#endif
 
 // DLL 関数の型定義
 typedef int (WINAPI* UnlhaPtr)(HWND, LPCSTR, LPSTR, DWORD);
@@ -83,23 +97,42 @@ int main(int argc, char* argv[]) {
     UINT cp = GetConsoleOutputCP();
     bool isJapanese = (cp == 932 || cp == 65001); // Shift-JIS or UTF-8
 
+    // 実際にロードされた DLL 名を保持
+    std::string loadedDllName = "";
+
     // DLL をロード
-    HMODULE hLib = LoadLibraryA("UnLha64x.dll");
-    if (!hLib) {
+    HMODULE hLib = LoadLibraryA(TARGET_DLL_NAME);
+    if (hLib) {
+        loadedDllName = TARGET_DLL_NAME;
+    } else {
         // カレントディレクトリになければビルド出力先を探す
 #ifdef _DEBUG
-        hLib = LoadLibraryA("../bin/Debug/UnLha64x.dll");
+        hLib = LoadLibraryA(DLL_DEBUG_PATH);
 #else
-        hLib = LoadLibraryA("../bin/Release/UnLha64x.dll");
+        hLib = LoadLibraryA(DLL_RELEASE_PATH);
 #endif
+        if (hLib) {
+            loadedDllName = TARGET_DLL_NAME;
+        }
     }
 
     if (!hLib) {
+        // フォールバック DLL をロード
+        hLib = LoadLibraryA(FALLBACK_DLL_NAME);
+        if (hLib) {
+            loadedDllName = FALLBACK_DLL_NAME;
+        }
+    }
+
+    if (!hLib) {
+        char buf[256];
         if (isJapanese) {
-            ConsolePrint("エラー: UnLha64x.dll をロードできませんでした。\n", true);
+            sprintf_s(buf, "エラー: %s または %s をロードできませんでした。\n", TARGET_DLL_NAME, FALLBACK_DLL_NAME);
+            ConsolePrint(buf, true);
             ConsolePrint("DLLがパスの通った場所、または実行ファイルと同じディレクトリにあるか確認してください。\n", true);
         } else {
-            ConsolePrint("Error: Could not load UnLha64x.dll.\n", true);
+            sprintf_s(buf, "Error: Could not load %s or %s.\n", TARGET_DLL_NAME, FALLBACK_DLL_NAME);
+            ConsolePrint(buf, true);
         }
         return 1;
     }
@@ -124,9 +157,10 @@ int main(int argc, char* argv[]) {
         WORD cliVer = GetCliVersion();
         char buf[256];
         if (isJapanese) {
-            sprintf_s(buf, "UnLha64CLI version %d.%02d (using UnLha64x.dll v%d.%02d)\n", (cliVer / 100), (cliVer % 100), (dllVer / 100), (dllVer % 100));
+            sprintf_s(buf, "%s version %d.%02d (using %s v%d.%02d)\n", CLI_TOOL_NAME, (cliVer / 100), (cliVer % 100), loadedDllName.c_str(), (dllVer / 100), (dllVer % 100));
             ConsolePrint(buf);
-            ConsolePrint("使用法: UnLha64CLI <command> [options] <archive> [files...]\n");
+            sprintf_s(buf, "使用法: %s <command> [options] <archive> [files...]\n", CLI_TOOL_NAME);
+            ConsolePrint(buf);
             ConsolePrint("\n主要なコマンド:\n");
             ConsolePrint("  l <arc> : アーカイブ内のファイル一覧を表示\n");
             ConsolePrint("  e <arc> : アーカイブを展開\n");
@@ -134,9 +168,10 @@ int main(int argc, char* argv[]) {
             ConsolePrint("  a <arc> <files...> : ファイルをアーカイブに追加/作成\n");
             ConsolePrint("  d <arc> <files...> : アーカイブからファイルを削除\n");
         } else {
-            sprintf_s(buf, "UnLha64CLI version %d.%02d (using UnLha64x.dll v%d.%02d)\n", (cliVer / 100), (cliVer % 100), (dllVer / 100), (dllVer % 100));
+            sprintf_s(buf, "%s version %d.%02d (using %s v%d.%02d)\n", CLI_TOOL_NAME, (cliVer / 100), (cliVer % 100), loadedDllName.c_str(), (dllVer / 100), (dllVer % 100));
             ConsolePrint(buf);
-            ConsolePrint("Usage: UnLha64CLI <command> [options] <archive> [files...]\n");
+            sprintf_s(buf, "Usage: %s <command> [options] <archive> [files...]\n", CLI_TOOL_NAME);
+            ConsolePrint(buf);
             ConsolePrint("\nCommands:\n");
             ConsolePrint("  l <arc> : List files in archive\n");
             ConsolePrint("  e <arc> : Extract files\n");

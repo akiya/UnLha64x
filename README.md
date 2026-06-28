@@ -1,4 +1,4 @@
-﻿# UnLha64x.dll
+# UnLha64x.dll
 
 UnLha64x.dll は、Windows (x64) 環境で LZH 形式の書庫を操作するためのアーカイバライブラリです。  
 **UNLHA32.DLL** の 64 ビット版互換(機能縮小版)ライブラリとして作成されています。  
@@ -35,8 +35,15 @@ GitHubのページの右側にある **Releases** セクションから最新版
 
 ## 変更履歴
 
-### Ver. 1.02
-- `UnlhaSetOwnerWindowEx()`、`UnlhaSetOwnerWindowExTotal()` で指定したコールバックの返り値の扱いが間違っていたのを修正。  
+### Ver. 1.03
+- 互換性検証用に32ビット版もビルドできるようにしました。  
+- UnlhaCheckArchive()で自己解凍ファイルなども正しく判定できるように修正。  
+- UnlhaGetLastError() / UnlhaGetFileName / UnlhaGetOriginalSize / UnlhaGetDate / UnlhaGetTime / UnlhaGetAttribute などの互換APIを追加実装。  
+- UnlhaGetAttribute() が LHA for UNIX 等で作成された書庫でも正しい属性（読み取り専用、ディレクトリ）を解釈して返すように修正。  
+- 圧縮時に、元のファイル属性（読み取り専用）をヘッダの attribute フィールドに書き込むように対応。  
+- 引数の連続指定(-d1n1のような)の対応と、レスポンスファイルに対応。  
+- 圧縮時の基準ディレクトリ指定に対応。  
+- その他、互換性を高める修正を行いました。  
 
 過去の変更履歴は [こちら](History.md) を参照してください。
 
@@ -55,6 +62,7 @@ GitHubのページの右側にある **Releases** セクションから最新版
 - `UnlhaCheckArchive` / `UnlhaCheckArchiveW`: ファイルが正しい LZH アーカイブかチェック
 - `UnlhaQueryFunctionList`: 実装済み機能の問い合わせ（スタブ）
 - `UnlhaConfigDialog`: 設定ダイアログの表示（スタブ）
+- `UnlhaGetLastError`: 最後に発生したエラー値を取得
 
 ### ハンドルベース API (個別ファイル操作)
 - `UnlhaOpenArchive` / `UnlhaOpenArchiveW`: アーカイブを開きハンドルを取得
@@ -65,6 +73,13 @@ GitHubのページの右側にある **Releases** セクションから最新版
 - `UnlhaGetArcFileSize` / `Ex`: アーカイブファイルサイズの取得
 - `UnlhaGetArcOriginalSize` / `Ex`: 展開後合計サイズの取得
 - `UnlhaGetArcCompressedSize` / `Ex`: 圧縮後合計サイズの取得
+
+### 個別ファイル情報取得 API
+- `UnlhaGetFileNameA` / `UnlhaGetFileNameW`: 現在のファイルのファイル名を取得
+- `UnlhaGetOriginalSize` / `Ex`: 現在のファイルの展開前サイズを取得
+- `UnlhaGetDate`: 現在のファイルの最終更新日付を取得（MS-DOS形式）
+- `UnlhaGetTime`: 現在のファイルの最終更新時刻を取得（MS-DOS形式）
+- `UnlhaGetAttribute`: 現在のファイルの属性値を取得
 
 ### 通知設定 API
 - `UnlhaSetOwnerWindow`: 通知先ウィンドウの設定
@@ -124,23 +139,27 @@ GitHubのページの右側にある **Releases** セクションから最新版
 
 本プロジェクトには、ライブラリの使用例および動作検証用として以下のツールが同梱されています。  
 
-### UnLha64CLI
+### UnLha64CLI / UnLha32CLI
 コマンドラインからアーカイブ操作を行うためのツールです。
 - `Unlha` 関数を呼び出し、引数をそのままコマンドとして渡すシンプルな実装です。
 - C++ からの動的な DLL ロードと関数呼び出しの最小限のサンプルとして利用できます。
 
-### UnLha64Test
+### UnLha64Test / UnLha32Test
 Win32 API を使用した GUI ベースの総合テストツールです。
 - **解凍・圧縮タブ**: ドラッグ＆ドロップによる直感的な操作が可能です。
 - **進捗通知の可視化**: 1ファイルごとの進捗に加え、拡張API `UnlhaSetOwnerWindowExTotal` と `wm_arcextract_ex` メッセージを利用して書庫全体の進捗状況も取得し、2本のプログレスバーでリアルタイムに表示します（全体進捗表示の実際の実装例となっています）。
 - **Unicode API の利用例**: `UnlhaW` や `UnlhaOpenArchiveW` などの Unicode 版 API を使用した実装例となっています。
+
+### UnLha32x.dll
+互換性検証用の32ビット版です。  
+リネームして既存の UNLHA32.DLL 対応アプリから呼び出すことができます。  
 
 ## コマンドライン仕様
 
 `Unlha` / `UnlhaW` 関数に渡すコマンドライン文字列の書式は以下の通りです。
 
 ```
-[スイッチ...] <コマンド> [スイッチ...] <書庫名> [展開先ディレクトリ] [対象ファイルパターン...]
+[スイッチ...] <コマンド> [スイッチ...] <書庫名> [基準ディレクトリ] [対象ファイルパターン...]
 ```
 
 ### コマンド（命令）一覧
@@ -180,6 +199,10 @@ Win32 API を使用した GUI ベースの総合テストツールです。
 
 3. **UnLha64x 実装部**:
    本リポジトリに含まれるラッパー実装（`unlha64.cpp` 等）については、上記のライセンス条項に準じます。
+
+>このライセンスはUnLha64xを再配布する場合、同梱して配布する場合、修正したものを配布する場合などに、**UnLha64x自体に対して**適用されます。  
+>機能の一つとしてUnLha64xを呼び出すプログラム自体のライセンス（ソースコードの公開義務など）を縛るものではありません。  
+>※ただし、プログラムにUnLha64xを同梱して配布する場合は、同梱するUnLha64xに対してライセンス（ソースコードの添付など）が適用されますのでご注意ください。  
 
 ## 制作者
 ミコソフト / あきや  
