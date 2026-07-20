@@ -881,34 +881,34 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
         final_argv_strs.push_back(f);
     }
 
-    // UNLHA32.DLL 互換レイヤー: e/x/a/u/f/m/c archive [基準ディレクトリ/] [ファイル...]
+    // UNLHA32.DLL 互換レイヤー: すべてのコマンドに対応するように変更
     // アーカイブ名 (final_argv_strs[2 + exclude_patterns.size()]) の後の引数がディレクトリのように見えるかチェックし、
-    // 展開先ディレクトリ、または圧縮時の基準ディレクトリとして扱う。
+    // 必要に応じて展開先ディレクトリ、または圧縮時の基準ディレクトリとして扱う。その他のコマンドでは引数から除去する。
     char* compress_base_directory = nullptr;
     size_t archive_idx = 2 + exclude_patterns.size();
     if (final_argv_strs.size() >= archive_idx + 2) {
-        if (cmd_char == 'e' || cmd_char == 'x' || cmd_char == 'a' || cmd_char == 'u' || cmd_char == 'f' || cmd_char == 'm' || cmd_char == 'c') {
-            int dest_idx = -1;
-            size_t i = archive_idx + 1;
-            if (i < final_argv_strs.size()) {
-                size_t len = final_argv_strs[i].length();
-                if (len > 0U) {
-                    char last_char = final_argv_strs[i][len - 1];
-                    if (last_char == '/' || last_char == '\\' || last_char == ':') {
-                        dest_idx = (int)i;
-                    }
+        int dest_idx = -1;
+        size_t i = archive_idx + 1;
+        if (i < final_argv_strs.size()) {
+            size_t len = final_argv_strs[i].length();
+            if (len > 0U) {
+                char last_char = final_argv_strs[i][len - 1];
+                if (last_char == '/' || last_char == '\\' || last_char == ':') {
+                    dest_idx = (int)i;
                 }
             }
-            if (dest_idx != -1) {
-                if (cmd_char == 'e' || cmd_char == 'x') {
-                    // 静的にメモリ確保された文字列に複製して LhaCore の extract_directory に設定
-                    char* dest_dir = _strdup(final_argv_strs[dest_idx].c_str());
-                    extract_directory = dest_dir;
-                } else {
-                    compress_base_directory = _strdup(final_argv_strs[dest_idx].c_str());
-                }
-                final_argv_strs.erase(final_argv_strs.begin() + dest_idx);
+        }
+        if (dest_idx != -1) {
+            if (cmd_char == 'e' || cmd_char == 'x') {
+                // 静的にメモリ確保された文字列に複製して LhaCore の extract_directory に設定
+                char* dest_dir = _strdup(final_argv_strs[dest_idx].c_str());
+                extract_directory = dest_dir;
+            } else if (cmd_char == 'a' || cmd_char == 'u' || cmd_char == 'f' || cmd_char == 'm' || cmd_char == 'c') {
+                compress_base_directory = _strdup(final_argv_strs[dest_idx].c_str());
+            } else {
+                // その他のコマンド（t, l, v など）では、抽出した基準ディレクトリは使用しないので変数には格納せず、単に引数から除去する
             }
+            final_argv_strs.erase(final_argv_strs.begin() + dest_idx);
         }
     }
 
