@@ -177,19 +177,28 @@ volatile char* g_capture_buffer = NULL;
 volatile size_t g_capture_buffer_size = 0;
 volatile size_t g_capture_buffer_written = 0;
 
-/* バッファへの安全な書き込み処理 */
+/* バッファへの安全な書き込み処理（UNLHA32.DLL互換のため改行コードを CRLF に正規化） */
 static void capture_write(const char* str, size_t len) {
     if (!g_capture_buffer || g_capture_buffer_size == 0 || !str || len == 0) return;
-    if (g_capture_buffer_written >= g_capture_buffer_size - 1) return;
     
-    size_t available = g_capture_buffer_size - 1 - g_capture_buffer_written;
-    size_t to_write = (len < available) ? len : available;
-    
-    // volatile 警告を避けるため、一時ポインタでコピー
-    char* dest = (char*)g_capture_buffer + g_capture_buffer_written;
-    memcpy(dest, str, to_write);
-    g_capture_buffer_written += to_write;
-    g_capture_buffer[g_capture_buffer_written] = '\0';
+    char* dest = (char*)g_capture_buffer;
+    for (size_t i = 0; i < len; ++i) {
+        if (g_capture_buffer_written >= g_capture_buffer_size - 1) break;
+        char c = str[i];
+        if (c == '\n') {
+            // 直前の文字が \r でなければ \r を補完して CRLF に変換
+            if (g_capture_buffer_written == 0 || dest[g_capture_buffer_written - 1] != '\r') {
+                if (g_capture_buffer_written < g_capture_buffer_size - 2) {
+                    dest[g_capture_buffer_written++] = '\r';
+                } else {
+                    // バッファ末尾で \r\n の両方が収まらない場合は書き込まず終了
+                    break;
+                }
+            }
+        }
+        dest[g_capture_buffer_written++] = c;
+    }
+    dest[g_capture_buffer_written] = '\0';
 }
 
 int lha_printf(const char *fmt, ...) {

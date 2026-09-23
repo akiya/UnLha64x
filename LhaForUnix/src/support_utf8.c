@@ -5,6 +5,10 @@
 /*  Ver. 1.14i Contributed UTF-8 convertion for Mac OS X                    */
 /*                                              2002.06.29  Hiroto Sakai    */
 /* ------------------------------------------------------------------------ */
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #include "lha.h"
 
 #if defined(__APPLE__) && !USE_ICONV  /* Added by Hiroto Sakai */
@@ -148,16 +152,72 @@ ConvertEncodingByIconv(const char *src, char *dst, size_t dstsize,
 }
 #endif /* defined(__APPLE__) */
 
-#if ICONV_HAS_UTF8MAC
-#define LHA_ENCODING_UTF8 "UTF-8-MAC"
-#else
-#define LHA_ENCODING_UTF8 "UTF-8"
+#if defined(_WIN32)
+/**
+ * Windows API を使用した文字コード変換ヘルパー
+ */
+static int
+ConvertEncodingByWin32(const char *src, char *dst, size_t dstsize, UINT srcCP, UINT dstCP)
+{
+    if (!src || !dst || dstsize == 0) return -1;
+    dst[0] = '\0';
+
+    int srcLen = (int)strlen(src);
+    if (srcLen == 0) return 0;
+
+    // ソースコードページからワイド文字 (UTF-16LE) へ変換
+    int wlen = MultiByteToWideChar(srcCP, 0, src, srcLen, NULL, 0);
+    if (wlen <= 0) return -1;
+
+    wchar_t *wbuf = (wchar_t *)malloc((wlen + 1) * sizeof(wchar_t));
+    if (!wbuf) return -1;
+
+    MultiByteToWideChar(srcCP, 0, src, srcLen, wbuf, wlen);
+    wbuf[wlen] = L'\0';
+
+    // ワイド文字からターゲットコードページへ変換
+    int dlen = WideCharToMultiByte(dstCP, 0, wbuf, wlen, NULL, 0, NULL, NULL);
+    if (dlen <= 0 || (size_t)dlen >= dstsize) {
+        // バッファに収まる範囲で変換してヌル終端
+        int copyLen = WideCharToMultiByte(dstCP, 0, wbuf, wlen, dst, (int)dstsize - 1, NULL, NULL);
+        if (copyLen > 0) {
+            dst[copyLen] = '\0';
+        } else {
+            dst[0] = '\0';
+        }
+        free(wbuf);
+        return (dlen > 0 && (size_t)dlen < dstsize) ? 0 : -1;
+    }
+
+    WideCharToMultiByte(dstCP, 0, wbuf, wlen, dst, (int)dstsize, NULL, NULL);
+    dst[dlen] = '\0';
+    free(wbuf);
+    return 0;
+}
 #endif
 
 extern char *
 conv_to_utf8(char *dst, const char *src, size_t dstsize, int from_code)
 {
-#if defined(__APPLE__) && !USE_ICONV
+#if defined(_WIN32)
+    UINT cp = CP_ACP;
+    switch (from_code) {
+    case CODE_SJIS:
+        cp = 932;
+        break;
+    case CODE_EUC:
+        cp = 51932; // EUC-JP
+        break;
+    case CODE_LATIN1:
+        cp = 1252;
+        break;
+    default:
+        cp = CP_ACP;
+        break;
+    }
+    if (ConvertEncodingByWin32(src, dst, dstsize, cp, CP_UTF8) == 0)
+        return dst;
+#elif defined(__APPLE__) && !USE_ICONV
   unsigned long enc = 0; /* kCFStringEncodingMacRoman */
 
   switch (from_code) {
@@ -214,7 +274,25 @@ conv_to_utf8(char *dst, const char *src, size_t dstsize, int from_code)
 extern char *
 conv_from_utf8(char *dst, const char *src, size_t dstsize, int to_code)
 {
-#if defined(__APPLE__) && !USE_ICONV
+#if defined(_WIN32)
+    UINT cp = CP_ACP;
+    switch (to_code) {
+    case CODE_SJIS:
+        cp = 932;
+        break;
+    case CODE_EUC:
+        cp = 51932;
+        break;
+    case CODE_LATIN1:
+        cp = 1252;
+        break;
+    default:
+        cp = CP_ACP;
+        break;
+    }
+    if (ConvertEncodingByWin32(src, dst, dstsize, CP_UTF8, cp) == 0)
+        return dst;
+#elif defined(__APPLE__) && !USE_ICONV
   int srclen;
   unsigned long enc = 0; /* kCFStringEncodingMacRoman */
 

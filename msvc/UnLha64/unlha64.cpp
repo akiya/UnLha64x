@@ -160,6 +160,7 @@ extern "C" {
     extern volatile char* g_capture_buffer;
     extern volatile size_t g_capture_buffer_size;
     extern volatile size_t g_capture_buffer_written;
+    extern int optional_system_kanji_code;
 }
 
 
@@ -550,6 +551,11 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
             // -- で始まるスイッチ（またはスイッチ文字が / で /- で始まる場合）の処理
             if (sw_lower.find("-") == 0) {
                 std::string val = sw_lower.substr(1); // "--"の後の部分
+                if (val == "utf8") {
+                    // --utf8 は UTF-8 出力指定オプションとして通常の引数に保持
+                    expanded_args.push_back(arg);
+                    continue;
+                }
                 if (val.empty() || val == "1") {
                     enable_response = false;
                 } else if (val == "0") {
@@ -592,6 +598,11 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
         if (arg.empty()) continue;
 
         if (enable_switch && (arg[0] == '-' || arg[0] == '/') && arg.length() >= 2) {
+            // -- で始まるロングオプション（例: --utf8）は分解せずそのまま保持
+            if (arg.substr(1).find("-") == 0) {
+                raw_args.push_back(arg);
+                continue;
+            }
             char sw_char = arg[0];
             std::string content = arg.substr(1);
             size_t idx = 0;
@@ -660,6 +671,7 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     bool is_x_val = false;
     int jm_val = 2; // -jm2
     bool is_y_val = false;
+    bool output_utf8_mode = false; // デフォルトは Shift-JIS (CP932) 出力
 
     // コマンド（命令）とスイッチ、ファイルリストの分類
     for (size_t i = 0; i < raw_args.size(); ++i) {
@@ -764,6 +776,16 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
             log_file_path = sw.substr(3);
         } else if (s[0] == 'y') {
             is_y_val = true;
+        } else if (s.find("ju") == 0U) {
+            // -ju, -ju1 で UTF-8 出力、-ju0 で Shift-JIS 出力
+            if (s == "ju0") {
+                output_utf8_mode = false;
+            } else {
+                output_utf8_mode = true;
+            }
+        } else if (s == "-utf8") {
+            // --utf8 で UTF-8 出力
+            output_utf8_mode = true;
         }
     }
 
@@ -783,6 +805,13 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     Lha_ResetAbort();
     g_infp = NULL;
     g_outfp = NULL;
+
+    // 出力文字コードの設定（UNLHA32.DLL 互換のためデフォルトは Shift-JIS）
+    if (output_utf8_mode) {
+        optional_system_kanji_code = CODE_UTF8;
+    } else {
+        optional_system_kanji_code = CODE_SJIS;
+    }
 
     // LhaCore のグローバル変数に適用
     if (is_y_val) {
@@ -1013,12 +1042,13 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     g_running = false;
 
     if (!g_last_error.empty() && _szOutput && _dwSize > 0) {
-        int size_needed = WideCharToMultiByte(CP_ACP, 0, g_last_error.c_str(), -1, NULL, 0, NULL, NULL);
+        UINT errorCP = output_utf8_mode ? CP_UTF8 : CP_ACP;
+        int size_needed = WideCharToMultiByte(errorCP, 0, g_last_error.c_str(), -1, NULL, 0, NULL, NULL);
         if (size_needed > 0 && size_needed <= (int)_dwSize) {
-            WideCharToMultiByte(CP_ACP, 0, g_last_error.c_str(), -1, _szOutput, size_needed, NULL, NULL);
+            WideCharToMultiByte(errorCP, 0, g_last_error.c_str(), -1, _szOutput, size_needed, NULL, NULL);
         } else if (size_needed > (int)_dwSize) {
             std::string tempBuffer(size_needed, 0);
-            WideCharToMultiByte(CP_ACP, 0, g_last_error.c_str(), -1, &tempBuffer[0], size_needed, NULL, NULL);
+            WideCharToMultiByte(errorCP, 0, g_last_error.c_str(), -1, &tempBuffer[0], size_needed, NULL, NULL);
             strncpy(_szOutput, tempBuffer.c_str(), _dwSize - 1);
             _szOutput[_dwSize - 1] = '\0';
         }
@@ -1075,10 +1105,21 @@ int WINAPI UnlhaW(HWND _hwnd, LPCWSTR _szCmdLine, LPWSTR _szOutput, DWORD _dwSiz
 
     g_last_error.clear();
 
-    int result = Unlha(_hwnd, szCmdLineA.c_str(), NULL, 0);
+    std::vector<char> captureBuf;
+    if (_szOutput && _dwSize > 0) {
+        captureBuf.resize(65536, 0);
+    }
+
+    int result = Unlha(_hwnd, szCmdLineA.c_str(), captureBuf.empty() ? NULL : captureBuf.data(), (DWORD)captureBuf.size());
 
     if (!g_last_error.empty() && _szOutput && _dwSize > 0) {
         wcsncpy(_szOutput, g_last_error.c_str(), _dwSize - 1);
+        _szOutput[_dwSize - 1] = L'\0';
+    } else if (!captureBuf.empty() && captureBuf[0] != '\0' && _szOutput && _dwSize > 0) {
+        // 出力バッファの内容をワイド文字列に変換
+        int wsize = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, captureBuf.data(), -1, NULL, 0);
+        UINT cp = (wsize > 0) ? CP_UTF8 : CP_ACP;
+        MultiByteToWideChar(cp, 0, captureBuf.data(), -1, _szOutput, (int)_dwSize);
         _szOutput[_dwSize - 1] = L'\0';
     }
 

@@ -167,6 +167,9 @@ int main(int argc, char* argv[]) {
             ConsolePrint("  x <arc> : ディレクトリ構造を維持して展開\n");
             ConsolePrint("  a <arc> <files...> : ファイルをアーカイブに追加/作成\n");
             ConsolePrint("  d <arc> <files...> : アーカイブからファイルを削除\n");
+            ConsolePrint("\n主要なオプション:\n");
+            ConsolePrint("  -ju / --utf8 : バッファ出力を UTF-8 に指定 (デフォルトは Shift-JIS)\n");
+            ConsolePrint("  -d1          : ディレクトリ構造を格納/展開\n");
         } else {
             sprintf_s(buf, "%s version %d.%02d (using %s v%d.%02d)\n", CLI_TOOL_NAME, (cliVer / 100), (cliVer % 100), loadedDllName.c_str(), (dllVer / 100), (dllVer % 100));
             ConsolePrint(buf);
@@ -178,16 +181,32 @@ int main(int argc, char* argv[]) {
             ConsolePrint("  x <arc> : Extract with paths\n");
             ConsolePrint("  a <arc> <files...> : Add/Create archive\n");
             ConsolePrint("  d <arc> <files...> : Delete files from archive\n");
+            ConsolePrint("\nOptions:\n");
+            ConsolePrint("  -ju / --utf8 : Output text in UTF-8 (Default is Shift-JIS)\n");
+            ConsolePrint("  -d1          : Store/Extract with directory structure\n");
         }
         
         FreeLibrary(hLib);
         return 0;
     }
 
-    // コマンドライン引数を再構築 (DLL に渡すため)
+    // コマンドライン引数を再構築 (DLL に渡すため) および UTF-8 オプションの判定
     std::string commandLine;
+    bool isUtf8Output = false;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        std::string argLower = arg;
+        for (char& c : argLower) c = (char)tolower((unsigned char)c);
+
+        if (argLower == "-ju" || argLower == "/ju" || argLower == "-ju1" || argLower == "/ju1" || argLower == "--utf8") {
+            isUtf8Output = true;
+        } else if (argLower == "-ju0" || argLower == "/ju0") {
+            isUtf8Output = false;
+        } else if ((argLower.find("-ju") == 0 || argLower.find("/ju") == 0) && argLower.find("0") == std::string::npos) {
+            isUtf8Output = true;
+        }
+
         // スペースを含む引数はクォートで囲む
         if (arg.find(' ') != std::string::npos && arg.front() != '\"') {
             commandLine += "\"" + arg + "\"";
@@ -208,7 +227,7 @@ int main(int argc, char* argv[]) {
 
     // 出力メッセージがあれば表示
     if (output[0] != '\0') {
-        ConsolePrint(output, false, false);
+        ConsolePrint(output, false, isUtf8Output);
         ConsolePrint("\n");
     }
 

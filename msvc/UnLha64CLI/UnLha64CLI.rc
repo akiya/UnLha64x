@@ -5,8 +5,8 @@
 // UnLha64CLI バージョン情報定義 (BOM付きUTF-8, CRLF)
 //
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,4,0,0
- PRODUCTVERSION 1,4,0,0
+ FILEVERSION 1,5,0,0
+ PRODUCTVERSION 1,5,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -23,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "micosoft / akiya" // 'mico'softです
             VALUE "FileDescription", "UnLha64CLI"
-            VALUE "FileVersion", "1.04"
+            VALUE "FileVersion", "1.05"
             VALUE "InternalName", "UnLha64CLI"
             VALUE "LegalCopyright", "© 2026 micosoft / akiya"
             VALUE "OriginalFilename", "UnLha64CLI.exe"
             VALUE "ProductName", "UnLha64CLI"
-            VALUE "ProductVersion", "1.04"
+            VALUE "ProductVersion", "1.05"
         END
     END
     BLOCK "VarFileInfo"
