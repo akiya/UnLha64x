@@ -35,7 +35,7 @@ static boolean decode_macbinary(FILE *ofp, off_t size, const char *outPath);
 
 /* ------------------------------------------------------------------------ */
 static          boolean
-inquire_extract(char *name)
+inquire_extract(char *name, const LzHeader *hdr, const char *display_name)
 {
     struct stat     stbuf;
 
@@ -50,13 +50,68 @@ inquire_extract(char *name)
             printf("EXTRACT %s but file is exist.\n", name);
             return FALSE;
         }
-        else if (!force) {
-            fatal_error("同名ファイルがあるので書き込めません。\n%s\n", name);
-            return FALSE;
+        else if (force) {
+            // -y 指定時: 既存ファイルが読み取り専用（ReadOnly）の場合に備え、書き込み権限（0666）を与えて上書き可能にする
+            chmod(name, 0666);
+            return TRUE;
         }
         else {
-            // 既存ファイルが読み取り専用（ReadOnly）の場合に備え、書き込み権限（0666）を与えて上書き可能にする
-            chmod(name, 0666);
+            // -u スイッチに基づく判定（デフォルト動作は -u1: 不在と新しいもの）
+            boolean should_extract = FALSE;
+            const char *skip_reason = NULL;
+
+            switch (update_mode) {
+            case 0: /* -u0 : すべて（タイムスタンプ等に関係なく無条件で上書き） */
+                should_extract = TRUE;
+                break;
+            case 1: /* -u1 : より新しいか存在しないファイル（デフォルト動作） */
+                if (hdr->unix_last_modified_stamp > stbuf.st_mtime) {
+                    should_extract = TRUE;
+                } else {
+                    skip_reason = "最新のファイルが存在";
+                }
+                break;
+            case 2: /* -u2 : より古いか存在しないファイル */
+                if (hdr->unix_last_modified_stamp < stbuf.st_mtime) {
+                    should_extract = TRUE;
+                } else {
+                    skip_reason = "古いファイルが存在";
+                }
+                break;
+            case 3: /* -u3 : 存在しないかタイムスタンプ及びサイズの異なるファイル */
+                if (hdr->unix_last_modified_stamp != stbuf.st_mtime ||
+                    hdr->original_size != (size_t)stbuf.st_size) {
+                    should_extract = TRUE;
+                } else {
+                    skip_reason = "同じファイルがあります";
+                }
+                break;
+            default:
+                if (hdr->unix_last_modified_stamp > stbuf.st_mtime) {
+                    should_extract = TRUE;
+                } else {
+                    skip_reason = "最新のファイルが存在";
+                }
+                break;
+            }
+
+            if (should_extract) {
+                // 上書き実行のため ReadOnly 属性を自動解除
+                chmod(name, 0666);
+                return TRUE;
+            } else {
+                // 上書きせずにスキップ（正常終了扱い、ログ出力）
+                if (quiet != TRUE && skip_reason != NULL) {
+                    const char *pname = display_name ? display_name : name;
+                    int len = (int)strlen(pname);
+                    if (len < 25) {
+                        printf("Skipped  %-25s: %s\n", pname, skip_reason);
+                    } else {
+                        printf("Skipped  %s : %s\n", pname, skip_reason);
+                    }
+                }
+                return FALSE;
+            }
         }
     }
 
@@ -200,11 +255,20 @@ static void
 adjust_info(char *name, LzHeader *hdr)
 {
 #if defined(_WIN32)
-    /* Windows環境ではutime/utimesがディレクトリのタイムスタンプを変更できないため、 */
-    /* CreateFileとSetFileTimeを使用してタイムスタンプを復元する */
+    /* Windows環境ではCreateFileとSetFileTimeを使用して高精度タイムスタンプを復元する */
     if ((hdr->unix_mode & UNIX_FILE_TYPEMASK) != UNIX_FILE_SYMLINK) {
-        extern int win32_set_file_time(const char *name, time_t t);
-        win32_set_file_time(name, hdr->unix_last_modified_stamp);
+        extern int win32_set_file_time_ex(const char *name,
+                                          int has_win_time,
+                                          unsigned long ctime_low, unsigned long ctime_high,
+                                          unsigned long mtime_low, unsigned long mtime_high,
+                                          unsigned long atime_low, unsigned long atime_high,
+                                          time_t t);
+        win32_set_file_time_ex(name,
+                              hdr->has_win_time,
+                              hdr->win_ctime.dwLowDateTime, hdr->win_ctime.dwHighDateTime,
+                              hdr->win_mtime.dwLowDateTime, hdr->win_mtime.dwHighDateTime,
+                              hdr->win_atime.dwLowDateTime, hdr->win_atime.dwHighDateTime,
+                              hdr->unix_last_modified_stamp);
     }
 #elif HAVE_UTIMES
     struct timeval timevals[2];
@@ -421,7 +485,7 @@ extract_one(FILE *afp,  /* archive file */
             }
 #endif /* __APPLE__ */
             if (skip_flg == FALSE)  {
-                up_flag = inquire_extract(name);
+                up_flag = inquire_extract(name, hdr, q);
                 if (up_flag == FALSE && force == FALSE) {
                     return read_size;
                 }
@@ -511,7 +575,7 @@ extract_one(FILE *afp,  /* archive file */
 
 #ifdef S_IFLNK
                 if (skip_flg == FALSE)  {
-                    up_flag = inquire_extract(name);
+                    up_flag = inquire_extract(name, hdr, q);
                     if (up_flag == FALSE && force == FALSE) {
                         return read_size;
                     }

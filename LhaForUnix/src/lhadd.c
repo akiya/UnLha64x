@@ -143,6 +143,42 @@ add_one(FILE *fp, FILE *nafp, LzHeader *hdr)
     fseeko(nafp, next_pos, SEEK_SET);
 }
 
+/* 指定ディレクトリ配下に実体ファイル（通常ファイルやシンボリックリンク等）が存在するかチェック */
+static boolean
+has_regular_files(char *dir_name)
+{
+    int filec;
+    char **filev;
+    int i;
+    struct stat st;
+    boolean found = FALSE;
+
+    if (find_files(dir_name, &filec, &filev)) {
+        /* まず直下に通常ファイルがあるかチェック (高速化) */
+        for (i = 0; i < filec; i++) {
+            if (GETSTAT(filev[i], &st) == 0) {
+                if (!is_directory(&st)) {
+                    found = TRUE;
+                    break;
+                }
+            }
+        }
+        /* 直下にファイルが無かった場合のみ、サブディレクトリを再帰チェック */
+        if (!found) {
+            for (i = 0; i < filec; i++) {
+                if (GETSTAT(filev[i], &st) == 0 && is_directory(&st)) {
+                    if (has_regular_files(filev[i])) {
+                        found = TRUE;
+                        break;
+                    }
+                }
+            }
+        }
+        free_files(filec, filev);
+    }
+    return found;
+}
+
 FILE           *
 append_it(char *name, FILE *oafp, FILE *nafp)
 {
@@ -216,20 +252,60 @@ append_it(char *name, FILE *oafp, FILE *nafp)
         }
     }
 
+    /* 配下に実体ファイルを持つディレクトリは親ディレクトリ単体の -lhd- エントリを作成しない (UNLHA32.DLL互換) */
+    boolean skip_dir_entry = (directory && recursive_archiving && has_regular_files(name));
+
     if (!oafp || cmp > 0) { /* not in archive */
-        if (noexec)
-            printf("ADD %s\n", name);
-        else
-            add_one(fp, nafp, &hdr);
+        if (noexec) {
+            if (!skip_dir_entry)
+                printf("ADD %s\n", name);
+        }
+        else {
+            if (!skip_dir_entry)
+                add_one(fp, nafp, &hdr);
+        }
     }
     else {      /* cmp == 0 */
-        if (!update_if_newer ||
-            ahdr.unix_last_modified_stamp < hdr.unix_last_modified_stamp) {
-                                /* newer than archive's */
-            if (noexec)
-                printf("REPLACE %s\n", name);
-            else
-                add_one(fp, nafp, &hdr);
+        boolean should_replace = FALSE;
+        if (!update_if_newer) {
+            /* 通常追加 (a コマンドなど) は常に無条件置換 */
+            should_replace = TRUE;
+        }
+        else {
+            /* 更新 (u コマンド) は update_mode に従って判定 */
+            switch (update_mode) {
+            case 0: /* -u0 : すべて更新 */
+                should_replace = TRUE;
+                break;
+            case 1: /* -u1 : 追加元ファイルの方が新しい場合のみ更新（デフォルト） */
+                if (ahdr.unix_last_modified_stamp < hdr.unix_last_modified_stamp)
+                    should_replace = TRUE;
+                break;
+            case 2: /* -u2 : 追加元ファイルの方が古い場合のみ更新 */
+                if (ahdr.unix_last_modified_stamp > hdr.unix_last_modified_stamp)
+                    should_replace = TRUE;
+                break;
+            case 3: /* -u3 : タイムスタンプまたはサイズが異なる場合のみ更新 */
+                if (ahdr.unix_last_modified_stamp != hdr.unix_last_modified_stamp ||
+                    ahdr.original_size != hdr.original_size)
+                    should_replace = TRUE;
+                break;
+            default:
+                if (ahdr.unix_last_modified_stamp < hdr.unix_last_modified_stamp)
+                    should_replace = TRUE;
+                break;
+            }
+        }
+
+        if (should_replace) {
+            if (noexec) {
+                if (!skip_dir_entry)
+                    printf("REPLACE %s\n", name);
+            }
+            else {
+                if (!skip_dir_entry)
+                    add_one(fp, nafp, &hdr);
+            }
         }
         else {                  /* copy old to new */
             if (!noexec) {

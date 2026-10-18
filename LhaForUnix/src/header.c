@@ -476,6 +476,11 @@ generic_to_unix_stamp(long t)
 static long
 unix_to_generic_stamp(time_t t)
 {
+    /* UNLHA32.DLLの仕様に合わせて奇数秒を切り上げて偶数秒にする（DOS日時形式の分解能は2秒のため） */
+    if (t % 2 != 0) {
+        t += 1;
+    }
+
     struct tm *tm = localtime(&t);
 
     tm->tm_year -= 80;
@@ -623,16 +628,24 @@ get_extended_header(FILE *fp, LzHeader *hdr, size_t header_size, unsigned int *h
             /* Windows time stamp (FILETIME structure) */
             /* it is time in 100 nano seconds since 1601-01-01 00:00:00 */
 
-            skip_bytes(8); /* create time is ignored */
+            hdr->win_ctime.dwLowDateTime = (unsigned long)get_longword();
+            hdr->win_ctime.dwHighDateTime = (unsigned long)get_longword();
+            hdr->win_mtime.dwLowDateTime = (unsigned long)get_longword();
+            hdr->win_mtime.dwHighDateTime = (unsigned long)get_longword();
+            hdr->win_atime.dwLowDateTime = (unsigned long)get_longword();
+            hdr->win_atime.dwHighDateTime = (unsigned long)get_longword();
+            hdr->has_win_time = TRUE;
 
-            /* set last modified time */
-            if (hdr->header_level >= 2)
-                skip_bytes(8);  /* time_t has been already set */
-            else
-                hdr->unix_last_modified_stamp = wintime_to_unix_stamp();
-
-            skip_bytes(8); /* last access time is ignored */
-
+            /* Level 1 ヘッダの場合は更新日時を unix_last_modified_stamp にも反映 */
+            if (hdr->header_level < 2) {
+#if HAVE_UINT64_T
+                uint64_t t = ((uint64_t)hdr->win_mtime.dwHighDateTime << 32) | hdr->win_mtime.dwLowDateTime;
+                uint64_t epoch = ((uint64_t)0x019db1de << 32) + 0xd53e8000;
+                if (t >= epoch) {
+                    hdr->unix_last_modified_stamp = (time_t)((t - epoch) / 10000000);
+                }
+#endif
+            }
             break;
         case 0x42:
 #if DUMP_HEADER
@@ -1483,8 +1496,24 @@ init_header(char *name, struct stat *v_stat, LzHeader *hdr)
     }
 
     hdr->crc = 0x0000;
-    hdr->extend_type = EXTEND_UNIX;
+    hdr->extend_type = EXTEND_MSDOS; /* UNLHA32.DLL互換のためMS-DOS ('M') を設定 */
     hdr->unix_last_modified_stamp = v_stat->st_mtime;
+
+#ifdef _WIN32
+    /* Windows環境下で高精度FILETIME（作成・更新・アクセス日時）を取得 */
+    {
+        extern int win32_get_file_time(const char *name,
+                                       unsigned long *ctime_low, unsigned long *ctime_high,
+                                       unsigned long *mtime_low, unsigned long *mtime_high,
+                                       unsigned long *atime_low, unsigned long *atime_high);
+        if (win32_get_file_time(name,
+                                &hdr->win_ctime.dwLowDateTime, &hdr->win_ctime.dwHighDateTime,
+                                &hdr->win_mtime.dwLowDateTime, &hdr->win_mtime.dwHighDateTime,
+                                &hdr->win_atime.dwLowDateTime, &hdr->win_atime.dwHighDateTime)) {
+            hdr->has_win_time = TRUE;
+        }
+    }
+#endif
     /* since 00:00:00 JAN.1.1970 */
 #ifdef NOT_COMPATIBLE_MODE
     /* Please need your modification in this space. */
@@ -1713,10 +1742,8 @@ write_header_level1(char *data, LzHeader *hdr, char *pathname)
 
     put_word(hdr->crc);
 
-    if (generic_format)
-        put_byte(0x00);
-    else
-        put_byte(EXTEND_UNIX);
+    /* UNLHA32.DLLおよびMS-DOS/Windows互換のため OS種別は常に 'M' (EXTEND_MSDOS) を設定 */
+    put_byte(EXTEND_MSDOS);
 
     /* write extend header from here. */
 
@@ -1737,8 +1764,18 @@ write_header_level1(char *data, LzHeader *hdr, char *pathname)
         put_bytes(dirname, dir_length);
     }
 
+    /* MS-DOS属性拡張ヘッダ (0x40): アーカイブ属性 (0x20) 以外の属性（ディレクトリや読込専用など）がある場合に出力 */
+    if (hdr->attribute != GENERIC_ATTRIBUTE) {
+        put_word(5);            /* size: 1 (type) + 2 (attr) + 2 (next header size) */
+        put_byte(0x40);         /* MS-DOS attribute header */
+        put_word(hdr->attribute);
+    }
+
+    /* OS種別がMS-DOSのためUNIX固有情報拡張ヘッダは出力しない */
+#if 0
     if (!generic_format)
         write_unix_info(hdr);
+#endif
 
     put_word(0x0000);           /* next header size */
 
@@ -1793,10 +1830,8 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
 
     put_word(hdr->crc);
 
-    if (generic_format)
-        put_byte(0x00);
-    else
-        put_byte(EXTEND_UNIX);
+    /* UNLHA32.DLLおよびMS-DOS/Windows互換のため OS種別は常に 'M' (EXTEND_MSDOS) を設定 */
+    put_byte(EXTEND_MSDOS);
 
     /* write extend header from here. */
 
@@ -1807,6 +1842,11 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
     put_byte(0x00);
     headercrc_ptr = put_ptr;
     put_word(0x0000);           /* header CRC */
+
+    /* write code page header (0x46): CP932 (Shift-JIS) */
+    put_word(7);                /* size: 1 (type) + 4 (code page) + 2 (next header size) */
+    put_byte(0x46);             /* Code Page header */
+    put_longword(932);          /* CP932 */
 
     /* write filename and dirname */
     /* must have this header, even if the name_length is 0. */
@@ -1820,8 +1860,30 @@ write_header_level2(char *data, LzHeader *hdr, char *pathname)
         put_bytes(dirname, dir_length);
     }
 
+    /* Windows FILETIME 拡張ヘッダ (0x41): 作成・更新・アクセス日時 */
+    if (hdr->has_win_time) {
+        put_word(27);           /* size: 1 (type) + 24 (FILETIME*3) + 2 (next header size) */
+        put_byte(0x41);         /* Windows FILETIME header */
+        put_longword(hdr->win_ctime.dwLowDateTime);
+        put_longword(hdr->win_ctime.dwHighDateTime);
+        put_longword(hdr->win_mtime.dwLowDateTime);
+        put_longword(hdr->win_mtime.dwHighDateTime);
+        put_longword(hdr->win_atime.dwLowDateTime);
+        put_longword(hdr->win_atime.dwHighDateTime);
+    }
+
+    /* MS-DOS属性拡張ヘッダ (0x40): アーカイブ属性 (0x20) 以外の属性（ディレクトリや読込専用など）がある場合に出力 */
+    if (hdr->attribute != GENERIC_ATTRIBUTE) {
+        put_word(5);            /* size: 1 (type) + 2 (attr) + 2 (next header size) */
+        put_byte(0x40);         /* MS-DOS attribute header */
+        put_word(hdr->attribute);
+    }
+
+    /* OS種別がMS-DOSのためUNIX固有情報拡張ヘッダは出力しない */
+#if 0
     if (!generic_format)
         write_unix_info(hdr);
+#endif
 
     put_word(0x0000);           /* next header size */
 

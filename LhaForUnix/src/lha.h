@@ -285,6 +285,11 @@ struct string_pool {
     char           *buffer;
 };
 
+typedef struct {
+    unsigned long   dwLowDateTime;
+    unsigned long   dwHighDateTime;
+} LhaFileTime;
+
 typedef struct LzHeader {
     size_t          header_size;
     int             size_field_length;
@@ -308,6 +313,12 @@ typedef struct LzHeader {
     unsigned short  unix_gid;
     char            user[256];
     char            group[256];
+
+    /* Windows FILETIME 拡張ヘッダ (0x41) 用 */
+    boolean         has_win_time;
+    LhaFileTime     win_ctime; /* 作成日時 */
+    LhaFileTime     win_mtime; /* 更新日時 */
+    LhaFileTime     win_atime; /* 参照日時 */
 }  LzHeader;
 
 struct interfacing {
@@ -356,6 +367,7 @@ EXTERN boolean  output_to_stdout;
 /* add/update/delete command flags */
 EXTERN boolean  new_archive;
 EXTERN boolean  update_if_newer;
+EXTERN int      update_mode;        /* 0: -u0, 1: -u1/デフォルト, 2: -u2, 3: -u3 */
 EXTERN boolean  generic_format;
 
 EXTERN boolean  remove_temporary_at_error;

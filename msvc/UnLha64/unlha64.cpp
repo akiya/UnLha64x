@@ -672,6 +672,7 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     int jm_val = 2; // -jm2
     bool is_y_val = false;
     bool output_utf8_mode = false; // デフォルトは Shift-JIS (CP932) 出力
+    int update_mode_val = 1; // デフォルトは -u1 (不在と新しいもの)
 
     // コマンド（命令）とスイッチ、ファイルリストの分類
     for (size_t i = 0; i < raw_args.size(); ++i) {
@@ -776,6 +777,16 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
             log_file_path = sw.substr(3);
         } else if (s[0] == 'y') {
             is_y_val = true;
+        } else if (s[0] == 'u') {
+            if (s.length() == 1 || s == "u1") {
+                update_mode_val = 1;
+            } else if (s == "u0") {
+                update_mode_val = 0;
+            } else if (s == "u2") {
+                update_mode_val = 2;
+            } else if (s == "u3") {
+                update_mode_val = 3;
+            }
         } else if (s.find("ju") == 0U) {
             // -ju, -ju1 で UTF-8 出力、-ju0 で Shift-JIS 出力
             if (s == "ju0") {
@@ -814,6 +825,7 @@ int WINAPI Unlha(HWND _hwnd, LPCSTR _szCmdLine, LPSTR _szOutput, DWORD _dwSize) 
     }
 
     // LhaCore のグローバル変数に適用
+    update_mode = update_mode_val;
     if (is_y_val) {
         force = TRUE;
     } else {
@@ -1308,8 +1320,12 @@ static void MapHeaderToInfo(const LzHeader& hdr, INDIVIDUALINFO* _lpSearch) {
     // ファイル名をコピー
     strncpy(_lpSearch->szFileName, hdr.name, sizeof(_lpSearch->szFileName) - 1);
     
-    // 日付/時刻の変換（簡易版）
-    struct tm* t = localtime(&hdr.unix_last_modified_stamp);
+    // 日付/時刻の変換（UNLHA32.DLL仕様に合わせて奇数秒を切り上げ）
+    time_t mtime = hdr.unix_last_modified_stamp;
+    if (mtime % 2 != 0) {
+        mtime += 1;
+    }
+    struct tm* t = localtime(&mtime);
     if (t) {
         _lpSearch->wDate = ((t->tm_year - 80) << 9) | ((t->tm_mon + 1) << 5) | t->tm_mday;
         _lpSearch->wTime = (t->tm_hour << 11) | (t->tm_min << 5) | (t->tm_sec / 2);
@@ -1331,7 +1347,12 @@ static void MapHeaderToInfoW(const LzHeader& hdr, INDIVIDUALINFOW* _lpSearch) {
     std::wstring wname = StringToWString(hdr.name);
     wcsncpy(_lpSearch->szFileName, wname.c_str(), sizeof(_lpSearch->szFileName) / sizeof(wchar_t) - 1);
     
-    struct tm* t = localtime(&hdr.unix_last_modified_stamp);
+    // 日付/時刻の変換（UNLHA32.DLL仕様に合わせて奇数秒を切り上げ）
+    time_t mtime_w = hdr.unix_last_modified_stamp;
+    if (mtime_w % 2 != 0) {
+        mtime_w += 1;
+    }
+    struct tm* t = localtime(&mtime_w);
     if (t) {
         _lpSearch->wDate = ((t->tm_year - 80) << 9) | ((t->tm_mon + 1) << 5) | t->tm_mday;
         _lpSearch->wTime = (t->tm_hour << 11) | (t->tm_min << 5) | (t->tm_sec / 2);
@@ -1588,15 +1609,59 @@ BOOL WINAPI UnlhaSetOwnerWindowExTotal(HWND _hwnd, LPARCHIVERPROC _lpArcProcArg,
     return TRUE;
 }
 
-// Windows環境において、ディレクトリやファイルのタイムスタンプを設定するヘルパー関数
-// (Cコードから呼び出すためのCリンケージ)
-int win32_set_file_time(const char* name, time_t t) {
-    ULARGE_INTEGER ull;
-    ull.QuadPart = ((ULONGLONG)t * 10000000ULL) + 116444736000000000ULL;
-    
-    FILETIME ft;
-    ft.dwLowDateTime = ull.LowPart;
-    ft.dwHighDateTime = ull.HighPart;
+// Windows環境において、ファイルやディレクトリの高精度タイムスタンプ（FILETIME）を取得するヘルパー関数
+int win32_get_file_time(const char* name, 
+                        unsigned long* ctime_low, unsigned long* ctime_high,
+                        unsigned long* mtime_low, unsigned long* mtime_high,
+                        unsigned long* atime_low, unsigned long* atime_high) {
+    if (!name || !ctime_low || !ctime_high || !mtime_low || !mtime_high || !atime_low || !atime_high) {
+        return 0;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExA(name, GetFileExInfoStandard, &fad)) {
+        *ctime_low = fad.ftCreationTime.dwLowDateTime;
+        *ctime_high = fad.ftCreationTime.dwHighDateTime;
+        *mtime_low = fad.ftLastWriteTime.dwLowDateTime;
+        *mtime_high = fad.ftLastWriteTime.dwHighDateTime;
+        *atime_low = fad.ftLastAccessTime.dwLowDateTime;
+        *atime_high = fad.ftLastAccessTime.dwHighDateTime;
+        return 1;
+    }
+    return 0;
+}
+
+// Windows環境において、ディレクトリやファイルのタイムスタンプを設定するヘルパー関数（拡張版）
+int win32_set_file_time_ex(const char* name, 
+                           int has_win_time,
+                           unsigned long ctime_low, unsigned long ctime_high,
+                           unsigned long mtime_low, unsigned long mtime_high,
+                           unsigned long atime_low, unsigned long atime_high,
+                           time_t t) {
+    FILETIME ftCreate, ftAccess, ftWrite;
+    const FILETIME *pCreate = NULL;
+    const FILETIME *pAccess = NULL;
+    const FILETIME *pWrite = NULL;
+
+    if (has_win_time) {
+        ftCreate.dwLowDateTime = ctime_low;
+        ftCreate.dwHighDateTime = ctime_high;
+        ftWrite.dwLowDateTime = mtime_low;
+        ftWrite.dwHighDateTime = mtime_high;
+        ftAccess.dwLowDateTime = atime_low;
+        ftAccess.dwHighDateTime = atime_high;
+
+        pCreate = &ftCreate;
+        pWrite = &ftWrite;
+        pAccess = &ftAccess;
+    } else {
+        ULARGE_INTEGER ull;
+        ull.QuadPart = ((ULONGLONG)t * 10000000ULL) + 116444736000000000ULL;
+        ftWrite.dwLowDateTime = ull.LowPart;
+        ftWrite.dwHighDateTime = ull.HighPart;
+
+        pWrite = &ftWrite;
+        pAccess = &ftWrite;
+    }
 
     // ディレクトリやファイルを開く (FILE_FLAG_BACKUP_SEMANTICS が必要)
     HANDLE hFile = CreateFileA(name, 
@@ -1610,9 +1675,14 @@ int win32_set_file_time(const char* name, time_t t) {
         return 0; // 失敗
     }
 
-    BOOL result = SetFileTime(hFile, NULL, &ft, &ft);
+    BOOL result = SetFileTime(hFile, pCreate, pAccess, pWrite);
     CloseHandle(hFile);
     return result ? 1 : 0;
+}
+
+// 従来のtime_t版互換ラッパー
+int win32_set_file_time(const char* name, time_t t) {
+    return win32_set_file_time_ex(name, 0, 0, 0, 0, 0, 0, 0, t);
 }
 
 int WINAPI UnlhaGetFileNameA(HARC _harc, LPSTR _lpBuffer, const int _nSize) {
@@ -1708,7 +1778,12 @@ WORD WINAPI UnlhaGetDate(HARC _harc) {
         return 0;
     }
     const LzHeader& hdr = ctx->headers[ctx->currentIndex - 1];
-    struct tm* t = localtime(&hdr.unix_last_modified_stamp);
+    // UNLHA32.DLL仕様に合わせて奇数秒を切り上げ
+    time_t mtime = hdr.unix_last_modified_stamp;
+    if (mtime % 2 != 0) {
+        mtime += 1;
+    }
+    struct tm* t = localtime(&mtime);
     WORD wDate = 0;
     if (t) {
         wDate = ((t->tm_year - 80) << 9) | ((t->tm_mon + 1) << 5) | t->tm_mday;
@@ -1729,7 +1804,12 @@ WORD WINAPI UnlhaGetTime(HARC _harc) {
         return 0;
     }
     const LzHeader& hdr = ctx->headers[ctx->currentIndex - 1];
-    struct tm* t = localtime(&hdr.unix_last_modified_stamp);
+    // UNLHA32.DLL仕様に合わせて奇数秒を切り上げ
+    time_t mtime = hdr.unix_last_modified_stamp;
+    if (mtime % 2 != 0) {
+        mtime += 1;
+    }
+    struct tm* t = localtime(&mtime);
     WORD wTime = 0;
     if (t) {
         wTime = (t->tm_hour << 11) | (t->tm_min << 5) | (t->tm_sec / 2);
@@ -1754,9 +1834,15 @@ int WINAPI UnlhaGetAttribute(HARC _harc) {
     int attr = 0;
     bool isDir = false;
 
-    // 1. ディレクトリ判定 (ファイル名末尾またはUNIX mode)
+    // 1. ディレクトリ判定 (ファイル名末尾、メソッド、属性値、またはUNIX mode)
     size_t len = strlen(hdr.name);
     if (len > 0 && (hdr.name[len - 1] == '/' || hdr.name[len - 1] == '\\')) {
+        isDir = true;
+    }
+    if (memcmp(hdr.method, "-lhd-", 5) == 0) {
+        isDir = true;
+    }
+    if (hdr.attribute & 0x10) {
         isDir = true;
     }
     if (hdr.extend_type == 0x55) { // EXTEND_UNIX ('U')

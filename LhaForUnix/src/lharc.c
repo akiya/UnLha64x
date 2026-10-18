@@ -92,6 +92,7 @@ lha_init_variable()     /* Added N.Watazaki */
 /* append command flags */
     new_archive         = FALSE;
     update_if_newer     = FALSE;
+    update_mode         = 1;
     delete_after_append = FALSE;
     generic_format      = FALSE;
 
